@@ -48,8 +48,9 @@ Telegram (frankenstein long poll + editMessageText streaming)
       ├── Tool Dispatcher (loop до max_tool_iterations)
       │       ├── Memory (store/forget)
       │       ├── Forum Topics (create/rename/close/reopen/delete)
-      │       ├── Schedule (Phase 2)
-      │       ├── WebSearch (Phase 2)
+      │       ├── Schedule (cron/at/every)
+      │       ├── WebSearch (DuckDuckGo)
+      │       ├── TickTick (OAuth2 + CRUD tasks)
       │       └── ... расширяемо через tool_specs + execute_tool
       └── LLM Provider (configurable api_base: OpenRouter, Groq, etc.)
             │
@@ -93,7 +94,20 @@ src/
 ├── tools/
 │   ├── mod.rs             # ToolContext + tool_specs() + execute_tool()
 │   ├── memory.rs          # memory_store / memory_forget
-│   └── topics.rs          # create/rename/close/reopen/delete forum topics
+│   ├── topics.rs          # create/rename/close/reopen/delete forum topics
+│   ├── web_search.rs      # DuckDuckGo HTML scraping
+│   ├── schedule.rs        # schedule_add / schedule_list / schedule_cancel
+│   ├── model.rs           # set_model / get_model (hot reload)
+│   └── ticktick.rs        # TickTick auth/create/list/complete/delete
+│
+├── scheduler/
+│   ├── mod.rs             # poll loop, job execution
+│   └── store.rs           # SQLite: scheduled_jobs (cron/at/every)
+│
+├── ticktick/
+│   ├── mod.rs
+│   ├── client.rs          # TickTick REST API client
+│   └── oauth.rs           # OAuth2 flow + token storage
 │
 ├── memory/
 │   ├── mod.rs
@@ -109,6 +123,8 @@ IDENTITY.md                # роль, правила поведения
 FORMAT.md                  # Telegram HTML formatting rules
 config.toml                # конфиг без секретов
 .env                       # секреты, в .gitignore
+Dockerfile                 # multi-stage build
+compose.yml                # docker compose
 Cargo.toml
 ```
 
@@ -137,6 +153,10 @@ max_tokens = 4096
 allowed_users = ["username"]
 stream_throttle_ms = 300
 
+[scheduler]
+enabled = true
+poll_interval_secs = 15
+
 [memory]
 db_path = "data/agent.db"
 ```
@@ -146,6 +166,8 @@ db_path = "data/agent.db"
 LLM_API_KEY=sk-...          # или OPENROUTER_API_KEY (fallback)
 TELEGRAM_BOT_TOKEN=...
 GROQ_API_KEY=...             # optional, для STT
+TICKTICK_CLIENT_ID=...       # optional, для TickTick
+TICKTICK_CLIENT_SECRET=...   # optional, для TickTick
 RUST_LOG=info,agent=debug
 ```
 
@@ -175,14 +197,21 @@ RUST_LOG=info,agent=debug
 - [x] Scheduler poll loop: inject → agent → send response в Telegram
 - [x] One-shot auto-cleanup, валидация cron/timezone
 
-**Phase 3 — TickTick + Smart Memory**
-- [ ] OAuth2 flow + refresh tokens в SQLite
-- [ ] TickTick CRUD tasks tool
-- [ ] FTS5 + embeddings hybrid search
-- [ ] LLM-managed memory extraction (Mem0 паттерн)
+**Phase 3 — TickTick + Enhancements ✅**
+- [x] TickTick OAuth2 flow + refresh tokens в SQLite
+- [x] TickTick CRUD: create/list/complete/delete tasks
+- [x] Auto-naming forum topics (emoji + short title после первого обмена)
+- [x] Configurable timezone (chrono_tz, Moscow time в system prompt)
 
-**Phase 4 — Polish**
-- [ ] Multi-stage Docker build
-- [ ] Config валидация при старте (fail fast)
-- [ ] Hot reload модели без рестарта
-- [ ] MEMORY_SNAPSHOT.md export/hydration
+**Phase 4 — Docker ✅**
+- [x] Multi-stage Docker build (rust:1-alpine3.22 → alpine:3.22)
+- [x] compose.yml с volumes для data/config/prompts
+- [x] .dockerignore
+
+**Phase 5 — Polish ✅**
+- [x] FTS5 full-text search (core_memories + messages, auto-synced triggers)
+- [x] `memory_search` tool (FTS5, scope: memories/messages/all)
+- [x] LLM-managed memory extraction (Mem0 паттерн, background after each exchange)
+- [x] Config валидация при старте (timezone, prompt files, limits, model)
+- [x] Hot reload модели (`set_model` / `get_model` tools, RwLock swap)
+- [x] `memory_export` tool (snapshot all memories grouped by category)

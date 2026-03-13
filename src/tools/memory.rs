@@ -54,6 +54,143 @@ impl MemoryStoreTool {
     }
 }
 
+pub struct MemorySearchTool;
+
+impl MemorySearchTool {
+    pub fn spec() -> ChatCompletionTools {
+        ChatCompletionTools::Function(ChatCompletionTool {
+            function: FunctionObject {
+                name: "memory_search".into(),
+                description: Some(
+                    "Search stored memories and past conversations using full-text search. \
+                     Use when looking for specific facts, past discussions, or context."
+                        .into(),
+                ),
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (supports FTS5 syntax: AND, OR, NOT, prefix*)"
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["memories", "messages", "all"],
+                            "description": "Where to search: memories (stored facts), messages (chat history), or all"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default 10)"
+                        }
+                    },
+                    "required": ["query"]
+                })),
+                strict: None,
+            },
+        })
+    }
+
+    pub async fn execute(arguments: &str, store: &MemoryStore, chat_id: i64) -> Result<ToolResult> {
+        let args: serde_json::Value = serde_json::from_str(arguments)?;
+        let query = args["query"].as_str().unwrap_or("");
+        let scope = args["scope"].as_str().unwrap_or("all");
+        let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+
+        if query.is_empty() {
+            return Ok(ToolResult {
+                output: "Error: query is required".into(),
+            });
+        }
+
+        let mut output = String::new();
+
+        if scope == "memories" || scope == "all" {
+            let memories = store.search_memories(query, limit).await?;
+            if memories.is_empty() {
+                output.push_str("No memories found.\n");
+            } else {
+                output.push_str(&format!("Found {} memories:\n", memories.len()));
+                for m in &memories {
+                    output.push_str(&format!("- [{}] {}: {}\n", m.category, m.key, m.content));
+                }
+            }
+        }
+
+        if scope == "messages" || scope == "all" {
+            let messages = store.search_messages(query, Some(chat_id), limit).await?;
+            if messages.is_empty() {
+                if scope == "messages" {
+                    output.push_str("No messages found.\n");
+                }
+            } else {
+                output.push_str(&format!("\nFound {} messages:\n", messages.len()));
+                for m in &messages {
+                    let preview = if m.content.len() > 150 {
+                        format!("{}...", &m.content[..150])
+                    } else {
+                        m.content.clone()
+                    };
+                    output.push_str(&format!("- [{}] {}: {}\n", m.timestamp, m.role, preview));
+                }
+            }
+        }
+
+        Ok(ToolResult { output })
+    }
+}
+
+pub struct MemoryExportTool;
+
+impl MemoryExportTool {
+    pub fn spec() -> ChatCompletionTools {
+        ChatCompletionTools::Function(ChatCompletionTool {
+            function: FunctionObject {
+                name: "memory_export".into(),
+                description: Some(
+                    "Export all stored memories as a formatted snapshot. \
+                     Use when the user asks to see everything you know about them, \
+                     or for backup purposes."
+                        .into(),
+                ),
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                })),
+                strict: None,
+            },
+        })
+    }
+
+    pub async fn execute(store: &MemoryStore) -> Result<ToolResult> {
+        let memories = store.load_all_memories().await?;
+
+        if memories.is_empty() {
+            return Ok(ToolResult {
+                output: "No memories stored yet.".into(),
+            });
+        }
+
+        let mut output = format!("# Memory Snapshot\n\nTotal: {} memories\n\n", memories.len());
+
+        // Group by category
+        let mut by_category: std::collections::BTreeMap<String, Vec<&crate::memory::store::CoreMemory>> =
+            std::collections::BTreeMap::new();
+        for m in &memories {
+            by_category.entry(m.category.clone()).or_default().push(m);
+        }
+
+        for (category, items) in &by_category {
+            output.push_str(&format!("## {}\n\n", category));
+            for m in items {
+                output.push_str(&format!("- **{}**: {}\n", m.key, m.content));
+            }
+            output.push('\n');
+        }
+
+        Ok(ToolResult { output })
+    }
+}
+
 pub struct MemoryForgetTool;
 
 impl MemoryForgetTool {

@@ -79,6 +79,12 @@ impl Agent {
         bot: &Bot,
     ) -> Result<String> {
         let system_prompt = self.build_system_prompt().await?;
+
+        // Compress old messages if history is too long
+        if let Err(e) = self.maybe_compress_history(chat_id, thread_id).await {
+            tracing::warn!(error = %e, "history compression error");
+        }
+
         let history = self
             .memory
             .load_history(chat_id, thread_id, self.config.max_history_messages)
@@ -162,6 +168,7 @@ impl Agent {
                 bot,
                 chat_id,
                 thread_id,
+                llm: &self.llm,
                 ticktick: self.ticktick.as_ref(),
             };
             for tc in &result.tool_calls {
@@ -193,6 +200,203 @@ impl Agent {
             "Exceeded max tool iterations ({})",
             self.config.max_tool_iterations
         )
+    }
+
+    /// Compress old messages into a summary when history exceeds threshold.
+    /// Keeps the last `keep` messages intact, summarizes the rest.
+    async fn maybe_compress_history(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i32>,
+    ) -> Result<()> {
+        let threshold = self.config.max_history_messages;
+        let keep = threshold / 2; // keep recent half, compress older half
+
+        let all = self
+            .memory
+            .load_history(chat_id, thread_id, threshold + 10)
+            .await?;
+
+        if all.len() <= threshold {
+            return Ok(());
+        }
+
+        // Check if first message is already a summary
+        if all.first().map(|m| m.role.as_str()) == Some("system") {
+            // Already has a summary, check if we need to re-compress
+            if all.len() <= threshold {
+                return Ok(());
+            }
+        }
+
+        let to_compress = &all[..all.len() - keep];
+
+        // Build conversation text for summarization
+        let mut conversation = String::new();
+        for msg in to_compress {
+            let role = match msg.role.as_str() {
+                "system" => "Previous summary",
+                "user" => "User",
+                "assistant" => "Assistant",
+                _ => &msg.role,
+            };
+            conversation.push_str(&format!("{}: {}\n\n", role, msg.content));
+        }
+
+        let prompt = format!(
+            "Summarize this conversation concisely, preserving all important context, \
+             decisions, and facts. Write in the same language as the conversation.\n\n\
+             {}\n\n\
+             Reply with ONLY the summary, no preamble.",
+            conversation
+        );
+
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage::from(prompt.as_str()),
+        )];
+
+        let request = match CreateChatCompletionRequestArgs::default()
+            .model(self.llm.model())
+            .temperature(0.3_f32)
+            .max_tokens(500_u32)
+            .messages(messages)
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return Ok(()),
+        };
+
+        let (tx, mut rx) = mpsc::channel::<String>(32);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let summary = match self.llm.stream_chat(request, tx).await {
+            Ok(r) => r.text,
+            Err(e) => {
+                tracing::warn!(error = %e, "history compression failed");
+                return Ok(());
+            }
+        };
+
+        if summary.is_empty() {
+            return Ok(());
+        }
+
+        // Delete old messages and insert summary
+        let compressed_count = to_compress.len();
+        self.memory
+            .compress_messages(chat_id, thread_id, compressed_count, &summary)
+            .await?;
+
+        tracing::info!(
+            chat_id,
+            compressed = compressed_count,
+            summary_len = summary.len(),
+            "history compressed"
+        );
+
+        Ok(())
+    }
+
+    /// Background memory extraction (Mem0 pattern).
+    /// Analyzes the exchange and auto-stores important facts.
+    pub async fn extract_memories(
+        &self,
+        user_message: &str,
+        assistant_response: &str,
+    ) {
+        let memories = match self.memory.load_all_memories().await {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        let existing = if memories.is_empty() {
+            "No existing memories.".to_string()
+        } else {
+            memories
+                .iter()
+                .map(|m| format!("- {} ({}): {}", m.key, m.category, m.content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let prompt = format!(
+            "Analyze this conversation exchange and extract important facts about the user that should be remembered.\n\n\
+             Existing memories:\n{existing}\n\n\
+             User: {user}\n\
+             Assistant: {assistant}\n\n\
+             Return a JSON array of actions. Each action is one of:\n\
+             - {{\"action\": \"store\", \"key\": \"...\", \"content\": \"...\", \"category\": \"core|preference|decision\"}}\n\
+             - {{\"action\": \"delete\", \"key\": \"...\"}}\n\n\
+             Rules:\n\
+             - Only extract genuinely important, long-term facts (name, preferences, habits, decisions)\n\
+             - Do NOT store transient info (current question, temporary context)\n\
+             - Update existing memories if new info refines them\n\
+             - Delete memories that are contradicted by new info\n\
+             - Return [] if nothing worth remembering\n\
+             - Reply with ONLY the JSON array, nothing else",
+            user = truncate_str(user_message, 500),
+            assistant = truncate_str(assistant_response, 500),
+        );
+
+        let messages = vec![
+            ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessage::from(prompt.as_str()),
+            ),
+        ];
+
+        let request = match CreateChatCompletionRequestArgs::default()
+            .model(self.llm.model())
+            .temperature(0.3_f32)
+            .max_tokens(500_u32)
+            .messages(messages)
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let (tx, mut rx) = mpsc::channel::<String>(32);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = match self.llm.stream_chat(request, tx).await {
+            Ok(r) => r.text,
+            Err(e) => {
+                tracing::debug!(error = %e, "memory extraction failed");
+                return;
+            }
+        };
+
+        // Parse JSON array from response
+        let text = result.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+        let actions: Vec<serde_json::Value> = match serde_json::from_str(text) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+
+        for action in &actions {
+            match action["action"].as_str() {
+                Some("store") => {
+                    let key = action["key"].as_str().unwrap_or_default();
+                    let content = action["content"].as_str().unwrap_or_default();
+                    let category = action["category"].as_str().unwrap_or("core");
+                    if !key.is_empty() && !content.is_empty() {
+                        if let Err(e) = self.memory.store_memory(key, content, category).await {
+                            tracing::debug!(error = %e, key, "auto-store failed");
+                        } else {
+                            tracing::info!(key, "memory auto-extracted");
+                        }
+                    }
+                }
+                Some("delete") => {
+                    let key = action["key"].as_str().unwrap_or_default();
+                    if !key.is_empty() {
+                        let _ = self.memory.forget_memory(key).await;
+                        tracing::info!(key, "memory auto-deleted");
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Auto-name a forum topic after the first exchange.

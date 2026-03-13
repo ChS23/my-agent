@@ -54,7 +54,59 @@ impl MemoryStore {
                  );
 
                  CREATE INDEX IF NOT EXISTS idx_messages_session
-                     ON messages(chat_id, thread_id, timestamp);",
+                     ON messages(chat_id, thread_id, timestamp);
+
+                 -- FTS5 for core_memories search
+                 CREATE VIRTUAL TABLE IF NOT EXISTS core_memories_fts USING fts5(
+                     key, content, category,
+                     content=core_memories,
+                     content_rowid=rowid
+                 );
+
+                 -- Triggers to keep FTS in sync
+                 CREATE TRIGGER IF NOT EXISTS core_memories_ai AFTER INSERT ON core_memories BEGIN
+                     INSERT INTO core_memories_fts(rowid, key, content, category)
+                     VALUES (new.rowid, new.key, new.content, new.category);
+                 END;
+
+                 CREATE TRIGGER IF NOT EXISTS core_memories_ad AFTER DELETE ON core_memories BEGIN
+                     INSERT INTO core_memories_fts(core_memories_fts, rowid, key, content, category)
+                     VALUES ('delete', old.rowid, old.key, old.content, old.category);
+                 END;
+
+                 CREATE TRIGGER IF NOT EXISTS core_memories_au AFTER UPDATE ON core_memories BEGIN
+                     INSERT INTO core_memories_fts(core_memories_fts, rowid, key, content, category)
+                     VALUES ('delete', old.rowid, old.key, old.content, old.category);
+                     INSERT INTO core_memories_fts(rowid, key, content, category)
+                     VALUES (new.rowid, new.key, new.content, new.category);
+                 END;
+
+                 -- FTS5 for messages search
+                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                     role, content,
+                     content=messages,
+                     content_rowid=id
+                 );
+
+                 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+                     INSERT INTO messages_fts(rowid, role, content)
+                     VALUES (new.id, new.role, new.content);
+                 END;
+
+                 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                     INSERT INTO messages_fts(messages_fts, rowid, role, content)
+                     VALUES ('delete', old.id, old.role, old.content);
+                 END;",
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await?;
+
+        // Rebuild FTS indexes for any pre-existing data
+        conn.call(|db| {
+            db.execute_batch(
+                "INSERT OR IGNORE INTO core_memories_fts(core_memories_fts) VALUES('rebuild');
+                 INSERT OR IGNORE INTO messages_fts(messages_fts) VALUES('rebuild');",
             )?;
             Ok::<_, rusqlite::Error>(())
         })
@@ -127,6 +179,155 @@ impl MemoryStore {
             .await?;
 
         Ok(rows)
+    }
+
+    /// FTS5 search across core_memories. Returns ranked results.
+    pub async fn search_memories(&self, query: &str, limit: usize) -> Result<Vec<CoreMemory>> {
+        let query = query.to_string();
+        let rows = self
+            .conn
+            .call(move |db| {
+                let mut stmt = db.prepare(
+                    "SELECT cm.key, cm.content, cm.category,
+                            rank
+                     FROM core_memories_fts fts
+                     JOIN core_memories cm ON cm.rowid = fts.rowid
+                     WHERE core_memories_fts MATCH ?1
+                     ORDER BY rank
+                     LIMIT ?2",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![query, limit], |row| {
+                        Ok(CoreMemory {
+                            key: row.get(0)?,
+                            content: row.get(1)?,
+                            category: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .await?;
+
+        Ok(rows)
+    }
+
+    /// FTS5 search across chat messages. Returns matching messages with context.
+    pub async fn search_messages(
+        &self,
+        query: &str,
+        chat_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<ChatMessage>> {
+        let query = query.to_string();
+        let rows = self
+            .conn
+            .call(move |db| {
+                let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(cid) = chat_id {
+                    (
+                        "SELECT m.role, m.content, m.timestamp
+                         FROM messages_fts fts
+                         JOIN messages m ON m.id = fts.rowid
+                         WHERE messages_fts MATCH ?1 AND m.chat_id = ?2
+                         ORDER BY rank
+                         LIMIT ?3",
+                        vec![
+                            Box::new(query) as Box<dyn rusqlite::types::ToSql>,
+                            Box::new(cid),
+                            Box::new(limit as i64),
+                        ],
+                    )
+                } else {
+                    (
+                        "SELECT m.role, m.content, m.timestamp
+                         FROM messages_fts fts
+                         JOIN messages m ON m.id = fts.rowid
+                         WHERE messages_fts MATCH ?1
+                         ORDER BY rank
+                         LIMIT ?2",
+                        vec![
+                            Box::new(query) as Box<dyn rusqlite::types::ToSql>,
+                            Box::new(limit as i64),
+                        ],
+                    )
+                };
+
+                let mut stmt = db.prepare(sql)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                        Ok(ChatMessage {
+                            role: row.get(0)?,
+                            content: row.get(1)?,
+                            timestamp: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .await?;
+
+        Ok(rows)
+    }
+
+    /// Replace the oldest `count` messages with a summary message.
+    pub async fn compress_messages(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i32>,
+        count: usize,
+        summary: &str,
+    ) -> Result<()> {
+        let summary = summary.to_string();
+        self.conn
+            .call(move |db| {
+                let tx = db.transaction()?;
+
+                // Get IDs of oldest messages to delete
+                let ids: Vec<i64> = if let Some(tid) = thread_id {
+                    let mut stmt = tx.prepare(
+                        "SELECT id FROM messages WHERE chat_id = ?1 AND thread_id = ?2 ORDER BY id ASC LIMIT ?3",
+                    )?;
+                    let rows: Vec<i64> = stmt
+                        .query_map(rusqlite::params![chat_id, tid, count], |row| row.get(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    rows
+                } else {
+                    let mut stmt = tx.prepare(
+                        "SELECT id FROM messages WHERE chat_id = ?1 AND thread_id IS NULL ORDER BY id ASC LIMIT ?2",
+                    )?;
+                    let rows: Vec<i64> = stmt
+                        .query_map(rusqlite::params![chat_id, count], |row| row.get(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    rows
+                };
+
+                if ids.is_empty() {
+                    return Ok::<_, rusqlite::Error>(());
+                }
+
+                // Delete old messages
+                let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+                let sql = format!(
+                    "DELETE FROM messages WHERE id IN ({})",
+                    placeholders.join(",")
+                );
+                let params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    ids.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>).collect();
+                tx.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+
+                // Insert summary as a system message with earliest possible timestamp
+                tx.execute(
+                    "INSERT INTO messages (chat_id, thread_id, role, content, timestamp)
+                     VALUES (?1, ?2, 'system', ?3, '1970-01-01T00:00:00Z')",
+                    rusqlite::params![chat_id, thread_id, summary],
+                )?;
+
+                tx.commit()?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+
+        Ok(())
     }
 
     pub async fn save_message(

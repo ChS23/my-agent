@@ -25,11 +25,15 @@ pub struct StreamResult {
     pub tool_calls: Vec<StreamedToolCall>,
 }
 
-pub struct LlmClient {
-    client: Client<OpenAIConfig>,
+struct LlmParams {
     model: String,
     temperature: f32,
     max_tokens: u32,
+}
+
+pub struct LlmClient {
+    client: Client<OpenAIConfig>,
+    params: std::sync::RwLock<LlmParams>,
 }
 
 impl LlmClient {
@@ -40,22 +44,46 @@ impl LlmClient {
 
         Self {
             client: Client::with_config(config),
-            model: model.to_string(),
-            temperature,
-            max_tokens,
+            params: std::sync::RwLock::new(LlmParams {
+                model: model.to_string(),
+                temperature,
+                max_tokens,
+            }),
         }
     }
 
-    pub fn model(&self) -> &str {
-        &self.model
+    pub fn model(&self) -> String {
+        self.params.read().unwrap().model.clone()
     }
 
     pub fn temperature(&self) -> f32 {
-        self.temperature
+        self.params.read().unwrap().temperature
     }
 
     pub fn max_tokens(&self) -> u32 {
-        self.max_tokens
+        self.params.read().unwrap().max_tokens
+    }
+
+    /// Hot-swap model parameters at runtime.
+    pub fn set_model(&self, model: &str, temperature: Option<f32>, max_tokens: Option<u32>) {
+        let mut params = self.params.write().unwrap();
+        params.model = model.to_string();
+        if let Some(t) = temperature {
+            params.temperature = t;
+        }
+        if let Some(m) = max_tokens {
+            params.max_tokens = m;
+        }
+        tracing::info!(model, "LLM model hot-swapped");
+    }
+
+    /// Get current settings as a summary string.
+    pub fn current_settings(&self) -> String {
+        let p = self.params.read().unwrap();
+        format!(
+            "model={}, temperature={}, max_tokens={}",
+            p.model, p.temperature, p.max_tokens
+        )
     }
 
     /// Stream a chat completion. Sends text deltas to `delta_tx`.
@@ -152,6 +180,14 @@ pub fn build_messages(
             "assistant" => {
                 messages.push(ChatCompletionRequestMessage::Assistant(
                     ChatCompletionRequestAssistantMessage::from(msg.content.as_str()),
+                ));
+            }
+            "system" => {
+                // Compressed history summary — inject as user context
+                messages.push(ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage::from(
+                        format!("[Previous conversation summary]\n{}", msg.content).as_str(),
+                    ),
                 ));
             }
             _ => {}

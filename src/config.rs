@@ -114,6 +114,52 @@ impl Config {
             .build()?;
 
         let config: Config = settings.try_deserialize()?;
+        config.validate()?;
         Ok(config)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        // Timezone
+        self.agent
+            .timezone
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| anyhow::anyhow!("invalid timezone: {}", self.agent.timezone))?;
+
+        // Prompt files exist
+        for path in &self.agent.prompt_files {
+            if !std::path::Path::new(path).exists() {
+                anyhow::bail!("prompt file not found: {path}");
+            }
+        }
+
+        // Limits
+        if self.agent.max_tool_iterations == 0 {
+            anyhow::bail!("max_tool_iterations must be > 0");
+        }
+        if self.agent.max_history_messages == 0 {
+            anyhow::bail!("max_history_messages must be > 0");
+        }
+
+        // LLM
+        if self.llm.model.is_empty() {
+            anyhow::bail!("llm.model is required");
+        }
+        if self.llm.api_base.is_empty() {
+            anyhow::bail!("llm.api_base is required");
+        }
+
+        // Telegram
+        if self.telegram.allowed_users.is_empty() {
+            anyhow::bail!("telegram.allowed_users must not be empty");
+        }
+
+        // DB path parent
+        if let Some(parent) = std::path::Path::new(&self.memory.db_path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                tracing::warn!(path = %parent.display(), "db parent dir doesn't exist, will be created");
+            }
+        }
+
+        Ok(())
     }
 }
