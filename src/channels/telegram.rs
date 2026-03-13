@@ -7,8 +7,8 @@ use frankenstein::client_reqwest::Bot;
 use frankenstein::methods::{
     EditMessageTextParams, GetUpdatesParams, SendChatActionParams, SendMessageParams,
 };
-use frankenstein::types::ChatAction;
-use frankenstein::types::AllowedUpdate;
+use frankenstein::types::{AllowedUpdate, ChatAction};
+use frankenstein::ParseMode;
 use frankenstein::updates::{Update, UpdateContent};
 use frankenstein::AsyncTelegramApi;
 use tokio::sync::{broadcast, mpsc};
@@ -236,13 +236,15 @@ impl TelegramBot {
             }
 
             if accumulated.len() > 5 && last_edit.elapsed() >= throttle {
-                let display = format!("{}▍", &accumulated);
+                let html = crate::channels::format::md_to_telegram_html(&accumulated);
+                let display = format!("{}▍", html);
                 let bot_clone = bot.clone();
                 pending_edit = Some(tokio::spawn(async move {
                     let params = EditMessageTextParams::builder()
                         .chat_id(chat_id)
                         .message_id(msg_id)
                         .text(&display)
+                        .parse_mode(ParseMode::Html)
                         .build();
                     if let Err(e) = bot_clone.edit_message_text(&params).await {
                         tracing::debug!(error = %e, "stream edit failed");
@@ -288,10 +290,12 @@ impl TelegramBot {
     }
 
     async fn edit_message(&self, chat_id: i64, message_id: i32, text: &str) {
+        let html = super::format::md_to_telegram_html(text);
         let params = EditMessageTextParams::builder()
             .chat_id(chat_id)
             .message_id(message_id)
-            .text(text)
+            .text(&html)
+            .parse_mode(ParseMode::Html)
             .build();
 
         if let Err(e) = self.bot.edit_message_text(&params).await {
@@ -300,9 +304,11 @@ impl TelegramBot {
     }
 
     async fn send_final(&self, chat_id: i64, thread_id: Option<i32>, text: &str) {
+        let html = super::format::md_to_telegram_html(text);
         let mut params = SendMessageParams::builder()
             .chat_id(chat_id)
-            .text(text)
+            .text(&html)
+            .parse_mode(ParseMode::Html)
             .build();
 
         if let Some(tid) = thread_id {
