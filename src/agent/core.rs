@@ -2,7 +2,8 @@ use anyhow::Result;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
-    ChatCompletionRequestToolMessage, CreateChatCompletionRequestArgs, FunctionCall,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
+    CreateChatCompletionRequestArgs, FunctionCall,
 };
 use frankenstein::client_reqwest::Bot;
 use tokio::sync::mpsc;
@@ -11,12 +12,16 @@ use crate::config::AgentConfig;
 use crate::llm::LlmClient;
 use crate::memory::MemoryStore;
 use crate::scheduler::store::ScheduleStore;
+use crate::ticktick::TickTickClient;
 use crate::tools::ToolContext;
+use frankenstein::methods::EditForumTopicParams;
+use frankenstein::AsyncTelegramApi;
 
 pub struct Agent {
     llm: LlmClient,
     memory: MemoryStore,
     schedule_store: ScheduleStore,
+    ticktick: Option<TickTickClient>,
     identity: String,
     config: AgentConfig,
 }
@@ -26,6 +31,7 @@ impl Agent {
         llm: LlmClient,
         memory: MemoryStore,
         schedule_store: ScheduleStore,
+        ticktick: Option<TickTickClient>,
         identity: String,
         config: AgentConfig,
     ) -> Self {
@@ -33,6 +39,7 @@ impl Agent {
             llm,
             memory,
             schedule_store,
+            ticktick,
             identity,
             config,
         }
@@ -49,8 +56,14 @@ impl Agent {
             }
         }
 
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-        prompt.push_str(&format!("\n\nCurrent time: {now}\n"));
+        // Use configured timezone
+        let now = chrono::Utc::now();
+        let tz: chrono_tz::Tz = self.config.timezone.parse().unwrap_or(chrono_tz::Tz::UTC);
+        let local = now.with_timezone(&tz);
+        prompt.push_str(&format!(
+            "\n\nCurrent time: {}\n",
+            local.format("%Y-%m-%d %H:%M:%S %Z")
+        ));
 
         Ok(prompt)
     }
@@ -78,7 +91,7 @@ impl Agent {
         let mut messages =
             crate::llm::openrouter::build_messages(&system_prompt, &history, user_message);
 
-        let tool_specs = crate::tools::tool_specs();
+        let tool_specs = crate::tools::tool_specs(self.ticktick.is_some());
 
         for iteration in 0..self.config.max_tool_iterations {
             let mut builder = CreateChatCompletionRequestArgs::default();
@@ -149,6 +162,7 @@ impl Agent {
                 bot,
                 chat_id,
                 thread_id,
+                ticktick: self.ticktick.as_ref(),
             };
             for tc in &result.tool_calls {
                 let tool_result = crate::tools::execute_tool(
@@ -179,5 +193,114 @@ impl Agent {
             "Exceeded max tool iterations ({})",
             self.config.max_tool_iterations
         )
+    }
+
+    /// Auto-name a forum topic after the first exchange.
+    /// Generates a short title with emoji based on the conversation.
+    pub async fn maybe_name_topic(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i32>,
+        user_message: &str,
+        assistant_response: &str,
+        bot: &Bot,
+    ) {
+        let tid = match thread_id {
+            Some(tid) => tid,
+            None => return, // Not a thread
+        };
+
+        // Check if this is the first message in the thread
+        let history_count = self
+            .memory
+            .load_history(chat_id, thread_id, 5)
+            .await
+            .map(|h| h.len())
+            .unwrap_or(0);
+
+        // Only name on first exchange (user + assistant = 2 messages)
+        if history_count > 2 {
+            return;
+        }
+
+        // Generate topic name via LLM
+        let prompt = format!(
+            "Generate a very short forum topic name (max 4 words) with one fitting emoji at the start, based on this conversation.\n\
+             User: {}\n\
+             Assistant: {}\n\n\
+             Reply with ONLY the topic name, nothing else. Example: \"🛒 Список покупок\" or \"🦀 Rust async вопрос\"",
+            truncate_str(user_message, 200),
+            truncate_str(assistant_response, 200),
+        );
+
+        let messages = vec![
+            ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessage::from(prompt.as_str()),
+            ),
+        ];
+
+        let request = match CreateChatCompletionRequestArgs::default()
+            .model(self.llm.model())
+            .temperature(0.7_f32)
+            .max_tokens(50_u32)
+            .messages(messages)
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        // Use a throwaway channel
+        let (tx, mut rx) = mpsc::channel::<String>(32);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = self.llm.stream_chat(request, tx).await;
+        let topic_name = match result {
+            Ok(r) => r.text.trim().trim_matches('"').to_string(),
+            Err(e) => {
+                tracing::debug!(error = %e, "topic naming failed");
+                return;
+            }
+        };
+
+        if topic_name.is_empty() || topic_name.len() > 128 {
+            return;
+        }
+
+        // Extract emoji (first char if it's emoji) for icon
+        let icon = topic_name.chars().next().filter(|c| !c.is_ascii());
+
+        let params = EditForumTopicParams::builder()
+            .chat_id(chat_id)
+            .message_thread_id(tid)
+            .name(&topic_name)
+            .build();
+
+        match bot.edit_forum_topic(&params).await {
+            Ok(_) => tracing::info!(chat_id, thread_id = tid, name = %topic_name, "topic named"),
+            Err(e) => tracing::debug!(error = %e, "topic rename failed"),
+        }
+
+        // Set icon if we extracted one
+        if let Some(emoji) = icon {
+            let icon_params = EditForumTopicParams::builder()
+                .chat_id(chat_id)
+                .message_thread_id(tid)
+                .icon_custom_emoji_id(&emoji.to_string())
+                .build();
+            let _ = bot.edit_forum_topic(&icon_params).await;
+        }
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
     }
 }

@@ -5,6 +5,7 @@ mod error;
 mod llm;
 mod memory;
 mod scheduler;
+mod ticktick;
 mod tools;
 
 use std::sync::Arc;
@@ -65,11 +66,31 @@ async fn main() -> Result<()> {
         cfg.llm.max_tokens,
     );
 
+    // Init TickTick (optional)
+    let ticktick_client = match (
+        std::env::var("TICKTICK_CLIENT_ID"),
+        std::env::var("TICKTICK_CLIENT_SECRET"),
+    ) {
+        (Ok(client_id), Ok(client_secret)) if !client_id.is_empty() => {
+            let tt_db = cfg.memory.db_path.replace(".db", "_oauth.db");
+            let token_store =
+                ticktick::TokenStore::new(&tt_db, client_id, client_secret).await?;
+            let client = ticktick::TickTickClient::new(token_store);
+            tracing::info!("TickTick enabled");
+            Some(client)
+        }
+        _ => {
+            tracing::info!("TickTick disabled (no TICKTICK_CLIENT_ID/SECRET)");
+            None
+        }
+    };
+
     // Init agent
     let agent = Arc::new(agent::Agent::new(
         llm,
         memory,
         schedule_store,
+        ticktick_client,
         identity,
         cfg.agent.clone(),
     ));

@@ -168,10 +168,12 @@ RUST_LOG=info,agent=debug
 - [x] Graceful shutdown
 - [x] Structured logging (tracing)
 
-**Phase 2 — Scheduler + Web Search**
-- [ ] Schedule tool (cron + SQLite, паттерн ZeroClaw)
-- [ ] Web search tool (DuckDuckGo scraping)
-- [ ] Scheduler inject: cron jobs → agent messages
+**Phase 2 — Scheduler + Web Search ✅**
+- [x] Web search tool (DuckDuckGo HTML scraping + redirect URL decoding)
+- [x] Schedule tools: schedule_add / schedule_list / schedule_cancel
+- [x] 3 типа расписаний: cron (с timezone), at (one-shot), every (interval)
+- [x] Scheduler poll loop: inject → agent → send response в Telegram
+- [x] One-shot auto-cleanup, валидация cron/timezone
 
 **Phase 3 — TickTick + Smart Memory**
 - [ ] OAuth2 flow + refresh tokens в SQLite

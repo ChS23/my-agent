@@ -17,6 +17,8 @@ pub struct AgentConfig {
     pub max_tool_iterations: usize,
     pub max_history_messages: usize,
     pub prompt_files: Vec<String>,
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -87,6 +89,9 @@ impl Default for SttConfig {
             model: default_stt_model(),
         }
     }
+}
+fn default_timezone() -> String {
+    "Europe/Moscow".to_string()
 }
 fn default_api_base() -> String {
     "https://openrouter.ai/api/v1".to_string()

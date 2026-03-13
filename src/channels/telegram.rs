@@ -192,6 +192,19 @@ impl TelegramBot {
                 } else {
                     self.send_final(chat_id, thread_id, final_text).await;
                 }
+
+                // Auto-name the topic after first exchange
+                let text_for_naming = text.clone();
+                let final_for_naming = final_text.clone();
+                agent
+                    .maybe_name_topic(
+                        chat_id,
+                        thread_id,
+                        &text_for_naming,
+                        &final_for_naming,
+                        &self.bot,
+                    )
+                    .await;
             }
             Err(e) => {
                 tracing::error!(error = %e, chat_id, "agent error");
