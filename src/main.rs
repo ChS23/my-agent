@@ -32,10 +32,15 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load()?;
     tracing::info!(model = %cfg.llm.model, "config loaded");
 
-    // Load identity prompt
-    let identity = std::fs::read_to_string(&cfg.agent.identity_path)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", cfg.agent.identity_path))?;
-    tracing::info!(path = %cfg.agent.identity_path, "identity loaded");
+    // Load prompt files
+    let mut identity = String::new();
+    for path in &cfg.agent.prompt_files {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read {path}: {e}"))?;
+        identity.push_str(&content);
+        identity.push_str("\n\n");
+        tracing::info!(path = %path, "prompt loaded");
+    }
 
     // Init memory store
     let memory = memory::MemoryStore::new(&cfg.memory.db_path).await?;

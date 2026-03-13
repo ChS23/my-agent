@@ -1,7 +1,7 @@
 [agent]
 max_tool_iterations = 10
 max_history_messages = 50
-identity_path = "IDENTITY.md"
+prompt_files = ["SOUL.md", "IDENTITY.md", "FORMAT.md"]
 
 [llm]
 # api_base = "https://api.groq.com/openai/v1"  # Groq

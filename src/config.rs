@@ -14,7 +14,7 @@ pub struct Config {
 pub struct AgentConfig {
     pub max_tool_iterations: usize,
     pub max_history_messages: usize,
-    pub identity_path: String,
+    pub prompt_files: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
