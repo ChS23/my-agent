@@ -1,0 +1,10 @@
+target/
+data/
+.env
+.git/
+.idea/
+.vscode/
+*.md
+!SOUL.md
+!IDENTITY.md
+!FORMAT.md

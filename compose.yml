@@ -1,0 +1,15 @@
+services:
+  agent:
+    build: .
+    container_name: ai-agent
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./config.toml:/app/config.toml:ro
+      - ./SOUL.md:/app/SOUL.md:ro
+      - ./IDENTITY.md:/app/IDENTITY.md:ro
+      - ./FORMAT.md:/app/FORMAT.md:ro
+    env_file: .env
+    environment:
+      - RUST_LOG=info,agent=debug
+      - TZ=Europe/Moscow
