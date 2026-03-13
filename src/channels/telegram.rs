@@ -15,19 +15,24 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::agent::Agent;
 use crate::config::TelegramConfig;
+use crate::llm::SttClient;
 
 pub struct TelegramBot {
     bot: Bot,
+    token: String,
     allowed_users: HashSet<String>,
     stream_throttle: Duration,
+    stt: Option<SttClient>,
 }
 
 impl TelegramBot {
-    pub fn new(token: &str, config: &TelegramConfig) -> Self {
+    pub fn new(token: &str, config: &TelegramConfig, stt: Option<SttClient>) -> Self {
         Self {
             bot: Bot::new(token),
+            token: token.to_string(),
             allowed_users: config.allowed_users.iter().cloned().collect(),
             stream_throttle: Duration::from_millis(config.stream_throttle_ms),
+            stt,
         }
     }
 
@@ -100,11 +105,6 @@ impl TelegramBot {
             _ => return,
         };
 
-        let text: String = match &message.text {
-            Some(t) if !t.is_empty() => t.clone(),
-            _ => return,
-        };
-
         let chat_id = message.chat.id;
         let thread_id = message.message_thread_id;
 
@@ -118,6 +118,29 @@ impl TelegramBot {
             tracing::warn!(username, chat_id, "unauthorized");
             return;
         }
+
+        // Extract text from message or voice
+        let text = if let Some(ref t) = message.text {
+            if t.is_empty() {
+                return;
+            }
+            t.clone()
+        } else if let Some(ref voice) = message.voice {
+            match self.transcribe_voice(&voice.file_id).await {
+                Ok(t) => {
+                    tracing::info!(chat_id, len = t.len(), "voice transcribed");
+                    t
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, chat_id, "voice transcription failed");
+                    self.send_final(chat_id, thread_id, "Не удалось распознать голосовое.")
+                        .await;
+                    return;
+                }
+            }
+        } else {
+            return;
+        };
 
         tracing::info!(username, chat_id, len = text.len(), "message");
 
@@ -233,6 +256,35 @@ impl TelegramBot {
         if let Some(handle) = pending_edit {
             let _ = handle.await;
         }
+    }
+
+    async fn transcribe_voice(&self, file_id: &str) -> Result<String> {
+        let stt = self
+            .stt
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("STT not configured (set GROQ_API_KEY)"))?;
+
+        // Get file path from Telegram
+        let params = frankenstein::methods::GetFileParams::builder()
+            .file_id(file_id)
+            .build();
+        let file_resp = self.bot.get_file(&params).await?;
+        let file_path = file_resp
+            .result
+            .file_path
+            .ok_or_else(|| anyhow::anyhow!("no file_path in response"))?;
+
+        // Download file
+        let url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.token, file_path
+        );
+        let bytes = frankenstein::reqwest::get(&url).await?.bytes().await?;
+
+        tracing::debug!(size = bytes.len(), "voice file downloaded");
+
+        // Transcribe
+        stt.transcribe(bytes.to_vec(), "voice.ogg").await
     }
 
     async fn edit_message(&self, chat_id: i64, message_id: i32, text: &str) {

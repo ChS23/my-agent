@@ -33,10 +33,10 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
-    pub fn new(api_key: &str, model: &str, temperature: f32, max_tokens: u32) -> Self {
+    pub fn new(api_key: &str, api_base: &str, model: &str, temperature: f32, max_tokens: u32) -> Self {
         let config = OpenAIConfig::new()
             .with_api_key(api_key)
-            .with_api_base("https://openrouter.ai/api/v1");
+            .with_api_base(api_base);
 
         Self {
             client: Client::with_config(config),

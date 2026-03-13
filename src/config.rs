@@ -4,6 +4,8 @@ use serde::Deserialize;
 pub struct Config {
     pub agent: AgentConfig,
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub stt: SttConfig,
     pub telegram: TelegramConfig,
     pub memory: MemoryConfig,
 }
@@ -17,11 +19,21 @@ pub struct AgentConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LlmConfig {
+    #[serde(default = "default_api_base")]
+    pub api_base: String,
     pub model: String,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SttConfig {
+    #[serde(default = "default_stt_api_base")]
+    pub api_base: String,
+    #[serde(default = "default_stt_model")]
+    pub model: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -36,6 +48,23 @@ pub struct MemoryConfig {
     pub db_path: String,
 }
 
+fn default_stt_api_base() -> String {
+    "https://api.groq.com/openai/v1".to_string()
+}
+fn default_stt_model() -> String {
+    "whisper-large-v3".to_string()
+}
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            api_base: default_stt_api_base(),
+            model: default_stt_model(),
+        }
+    }
+}
+fn default_api_base() -> String {
+    "https://openrouter.ai/api/v1".to_string()
+}
 fn default_temperature() -> f32 {
     0.7
 }
