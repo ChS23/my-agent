@@ -78,6 +78,7 @@ impl Agent {
         chat_id: i64,
         thread_id: Option<i32>,
         user_message: &str,
+        image_urls: &[String],
         delta_tx: mpsc::Sender<String>,
         bot: &Bot,
     ) -> Result<String> {
@@ -98,7 +99,7 @@ impl Agent {
             .await?;
 
         let mut messages =
-            crate::llm::openrouter::build_messages(&system_prompt, &history, user_message);
+            crate::llm::openrouter::build_messages(&system_prompt, &history, user_message, image_urls);
 
         let tool_specs = crate::tools::tool_specs(self.ticktick.is_some());
 

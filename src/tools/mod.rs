@@ -3,6 +3,7 @@ mod model;
 mod schedule;
 mod ticktick;
 mod topics;
+mod url_reader;
 mod web_search;
 
 pub use memory::MemoryExportTool;
@@ -13,6 +14,7 @@ pub use schedule::{ScheduleAddTool, ScheduleCancelTool, ScheduleListTool};
 pub use ticktick::{TickTickAuthTool, TickTickCompleteTool, TickTickCreateTool, TickTickDeleteTool, TickTickListTool};
 pub use topics::{CloseTopicTool, CreateTopicTool, DeleteTopicTool, RenameTopicTool, ReopenTopicTool};
 pub use model::{GetModelTool, SetModelTool};
+pub use url_reader::UrlReaderTool;
 pub use web_search::WebSearchTool;
 
 use anyhow::Result;
@@ -58,6 +60,7 @@ pub fn tool_specs(has_ticktick: bool) -> Vec<ChatCompletionTools> {
         DeleteTopicTool::spec(),
         SetModelTool::spec(),
         GetModelTool::spec(),
+        UrlReaderTool::spec(),
     ];
 
     if has_ticktick {
@@ -120,6 +123,7 @@ pub async fn execute_tool(
         "delete_topic" => DeleteTopicTool::execute(arguments, ctx).await,
         "set_model" => SetModelTool::execute(arguments, ctx.llm).await,
         "get_model" => GetModelTool::execute(ctx.llm).await,
+        "read_url" => UrlReaderTool::execute(arguments).await,
         _ => Ok(ToolResult {
             output: format!("Unknown tool: {name}"),
         }),

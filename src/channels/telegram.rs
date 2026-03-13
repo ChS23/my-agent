@@ -119,12 +119,32 @@ impl TelegramBot {
             return;
         }
 
-        // Extract text from message or voice
+        // Extract text and images from message
+        let mut image_urls: Vec<String> = Vec::new();
+
+        // Handle photos
+        if let Some(ref photos) = message.photo {
+            // Take the largest photo (last in array)
+            if let Some(largest) = photos.last() {
+                match self.download_file_as_base64(&largest.file_id).await {
+                    Ok(b64) => {
+                        image_urls.push(format!("data:image/jpeg;base64,{}", b64));
+                        tracing::info!(chat_id, "photo received");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, chat_id, "photo download failed");
+                    }
+                }
+            }
+        }
+
         let text = if let Some(ref t) = message.text {
-            if t.is_empty() {
+            if t.is_empty() && image_urls.is_empty() {
                 return;
             }
             t.clone()
+        } else if let Some(ref caption) = message.caption {
+            caption.clone()
         } else if let Some(ref voice) = message.voice {
             match self.transcribe_voice(&voice.file_id).await {
                 Ok(t) => {
@@ -138,6 +158,9 @@ impl TelegramBot {
                     return;
                 }
             }
+        } else if !image_urls.is_empty() {
+            // Photo without caption — ask to describe
+            "Что на этом изображении?".to_string()
         } else {
             return;
         };
@@ -178,7 +201,7 @@ impl TelegramBot {
 
         // Process message (drives delta_tx via LLM streaming)
         let result = agent
-            .process_message(chat_id, thread_id, &text, delta_tx, &self.bot)
+            .process_message(chat_id, thread_id, &text, &image_urls, delta_tx, &self.bot)
             .await;
 
         // Wait for streaming task
@@ -271,6 +294,28 @@ impl TelegramBot {
         if let Some(handle) = pending_edit {
             let _ = handle.await;
         }
+    }
+
+    async fn download_file_as_base64(&self, file_id: &str) -> Result<String> {
+        use base64::Engine;
+
+        let params = frankenstein::methods::GetFileParams::builder()
+            .file_id(file_id)
+            .build();
+        let file_resp = self.bot.get_file(&params).await?;
+        let file_path = file_resp
+            .result
+            .file_path
+            .ok_or_else(|| anyhow::anyhow!("no file_path in response"))?;
+
+        let url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.token, file_path
+        );
+        let bytes = frankenstein::reqwest::get(&url).await?.bytes().await?;
+
+        tracing::debug!(size = bytes.len(), "file downloaded for vision");
+        Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
     }
 
     async fn transcribe_voice(&self, file_id: &str) -> Result<String> {

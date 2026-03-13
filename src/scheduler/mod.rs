@@ -78,7 +78,7 @@ impl Scheduler {
             });
 
             let result = agent
-                .process_message(job.chat_id, job.thread_id, &prompt, delta_tx, bot)
+                .process_message(job.chat_id, job.thread_id, &prompt, &[], delta_tx, bot)
                 .await;
 
             match &result {

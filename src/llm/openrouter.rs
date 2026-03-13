@@ -3,8 +3,11 @@ use async_openai::{
     config::OpenAIConfig,
     types::chat::{
         ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
-        CreateChatCompletionRequest, FinishReason,
+        ChatCompletionRequestMessageContentPartImage,
+        ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
+        ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+        ChatCompletionRequestUserMessageContentPart, CreateChatCompletionRequest, FinishReason,
+        ImageUrl,
     },
     Client,
 };
@@ -163,6 +166,7 @@ pub fn build_messages(
     system_prompt: &str,
     history: &[crate::memory::store::ChatMessage],
     user_message: &str,
+    image_urls: &[String],
 ) -> Vec<ChatCompletionRequestMessage> {
     let mut messages = Vec::with_capacity(history.len() + 2);
 
@@ -194,9 +198,42 @@ pub fn build_messages(
         }
     }
 
-    messages.push(ChatCompletionRequestMessage::User(
-        ChatCompletionRequestUserMessage::from(user_message),
-    ));
+    // Build user message — with images if present
+    if image_urls.is_empty() {
+        messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage::from(user_message),
+        ));
+    } else {
+        let mut parts: Vec<ChatCompletionRequestUserMessageContentPart> = Vec::new();
+
+        // Text part
+        if !user_message.is_empty() {
+            parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText {
+                    text: user_message.to_string(),
+                },
+            ));
+        }
+
+        // Image parts
+        for url in image_urls {
+            parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: ImageUrl {
+                        url: url.clone(),
+                        detail: None,
+                    },
+                },
+            ));
+        }
+
+        messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Array(parts),
+                name: None,
+            },
+        ));
+    }
 
     messages
 }
