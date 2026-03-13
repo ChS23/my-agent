@@ -9,7 +9,7 @@ use frankenstein::client_reqwest::Bot;
 use tokio::sync::mpsc;
 
 use crate::config::AgentConfig;
-use crate::llm::LlmClient;
+use crate::llm::{EmbeddingClient, LlmClient};
 use crate::memory::MemoryStore;
 use crate::scheduler::store::ScheduleStore;
 use crate::ticktick::TickTickClient;
@@ -19,6 +19,7 @@ use frankenstein::AsyncTelegramApi;
 
 pub struct Agent {
     llm: LlmClient,
+    embeddings: Option<EmbeddingClient>,
     memory: MemoryStore,
     schedule_store: ScheduleStore,
     ticktick: Option<TickTickClient>,
@@ -29,6 +30,7 @@ pub struct Agent {
 impl Agent {
     pub fn new(
         llm: LlmClient,
+        embeddings: Option<EmbeddingClient>,
         memory: MemoryStore,
         schedule_store: ScheduleStore,
         ticktick: Option<TickTickClient>,
@@ -37,6 +39,7 @@ impl Agent {
     ) -> Self {
         Self {
             llm,
+            embeddings,
             memory,
             schedule_store,
             ticktick,
@@ -169,6 +172,7 @@ impl Agent {
                 chat_id,
                 thread_id,
                 llm: &self.llm,
+                embeddings: self.embeddings.as_ref(),
                 ticktick: self.ticktick.as_ref(),
             };
             for tc in &result.tool_calls {

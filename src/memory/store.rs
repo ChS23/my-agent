@@ -56,6 +56,13 @@ impl MemoryStore {
                  CREATE INDEX IF NOT EXISTS idx_messages_session
                      ON messages(chat_id, thread_id, timestamp);
 
+                 -- Embeddings for semantic search
+                 CREATE TABLE IF NOT EXISTS memory_embeddings (
+                     key TEXT PRIMARY KEY REFERENCES core_memories(key) ON DELETE CASCADE,
+                     embedding BLOB NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+
                  -- FTS5 for core_memories search
                  CREATE VIRTUAL TABLE IF NOT EXISTS core_memories_fts USING fts5(
                      key, content, category,
@@ -269,6 +276,83 @@ impl MemoryStore {
         Ok(rows)
     }
 
+    /// Save embedding vector for a memory key.
+    pub async fn save_embedding(&self, key: &str, embedding: &[f32]) -> Result<()> {
+        let key = key.to_string();
+        let blob = embedding_to_blob(embedding);
+        let now = Utc::now().to_rfc3339();
+
+        self.conn
+            .call(move |db| {
+                db.execute(
+                    "INSERT INTO memory_embeddings (key, embedding, updated_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET
+                         embedding = excluded.embedding,
+                         updated_at = excluded.updated_at",
+                    rusqlite::params![key, blob, now],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Load all embeddings for semantic search.
+    pub async fn load_all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
+        let rows = self
+            .conn
+            .call(|db| {
+                let mut stmt = db.prepare(
+                    "SELECT key, embedding FROM memory_embeddings",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        let key: String = row.get(0)?;
+                        let blob: Vec<u8> = row.get(1)?;
+                        Ok((key, blob))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(key, blob)| (key, blob_to_embedding(&blob)))
+            .collect())
+    }
+
+    /// Semantic search: find memories most similar to query embedding.
+    pub async fn search_by_embedding(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(CoreMemory, f32)>> {
+        let all_embeddings = self.load_all_embeddings().await?;
+        let all_memories = self.load_all_memories().await?;
+
+        // Build key->memory map
+        let memory_map: std::collections::HashMap<&str, &CoreMemory> =
+            all_memories.iter().map(|m| (m.key.as_str(), m)).collect();
+
+        // Compute similarities
+        let mut scored: Vec<(CoreMemory, f32)> = all_embeddings
+            .iter()
+            .filter_map(|(key, emb)| {
+                let score = crate::llm::embeddings::cosine_similarity(query_embedding, emb);
+                memory_map.get(key.as_str()).map(|m| ((*m).clone(), score))
+            })
+            .collect();
+
+        // Sort by score descending
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        Ok(scored)
+    }
+
     /// Replace the oldest `count` messages with a summary message.
     pub async fn compress_messages(
         &self,
@@ -404,4 +488,16 @@ impl MemoryStore {
 
         Ok(rows)
     }
+}
+
+/// Encode f32 vector as little-endian bytes for SQLite blob storage.
+fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Decode little-endian bytes back to f32 vector.
+fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }

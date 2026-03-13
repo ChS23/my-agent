@@ -66,6 +66,16 @@ async fn main() -> Result<()> {
         cfg.llm.max_tokens,
     );
 
+    // Init embedding client (optional)
+    let embeddings = if cfg.embeddings.enabled {
+        let emb = llm::EmbeddingClient::new(&api_key, &cfg.llm.api_base, &cfg.embeddings.model);
+        tracing::info!(model = %cfg.embeddings.model, "embeddings enabled");
+        Some(emb)
+    } else {
+        tracing::info!("embeddings disabled");
+        None
+    };
+
     // Init TickTick (optional)
     let ticktick_client = match (
         std::env::var("TICKTICK_CLIENT_ID"),
@@ -88,6 +98,7 @@ async fn main() -> Result<()> {
     // Init agent
     let agent = Arc::new(agent::Agent::new(
         llm,
+        embeddings,
         memory,
         schedule_store,
         ticktick_client,

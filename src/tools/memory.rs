@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_openai::types::chat::{ChatCompletionTool, ChatCompletionTools, FunctionObject};
 
 use super::ToolResult;
+use crate::llm::EmbeddingClient;
 use crate::memory::MemoryStore;
 
 pub struct MemoryStoreTool;
@@ -40,13 +41,32 @@ impl MemoryStoreTool {
         })
     }
 
-    pub async fn execute(arguments: &str, store: &MemoryStore) -> Result<ToolResult> {
+    pub async fn execute(
+        arguments: &str,
+        store: &MemoryStore,
+        embeddings: Option<&EmbeddingClient>,
+    ) -> Result<ToolResult> {
         let args: serde_json::Value = serde_json::from_str(arguments)?;
         let key = args["key"].as_str().unwrap_or("unknown");
         let content = args["content"].as_str().unwrap_or("");
         let category = args["category"].as_str().unwrap_or("core");
 
         store.store_memory(key, content, category).await?;
+
+        // Generate and store embedding in background
+        if let Some(emb_client) = embeddings {
+            let embed_text = format!("{}: {}", key, content);
+            match emb_client.embed(&embed_text).await {
+                Ok(vec) => {
+                    if let Err(e) = store.save_embedding(key, &vec).await {
+                        tracing::warn!(error = %e, key, "failed to save embedding");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, key, "failed to generate embedding");
+                }
+            }
+        }
 
         Ok(ToolResult {
             output: format!("Stored: {key} = {content}"),
@@ -90,7 +110,12 @@ impl MemorySearchTool {
         })
     }
 
-    pub async fn execute(arguments: &str, store: &MemoryStore, chat_id: i64) -> Result<ToolResult> {
+    pub async fn execute(
+        arguments: &str,
+        store: &MemoryStore,
+        chat_id: i64,
+        embeddings: Option<&EmbeddingClient>,
+    ) -> Result<ToolResult> {
         let args: serde_json::Value = serde_json::from_str(arguments)?;
         let query = args["query"].as_str().unwrap_or("");
         let scope = args["scope"].as_str().unwrap_or("all");
@@ -105,13 +130,51 @@ impl MemorySearchTool {
         let mut output = String::new();
 
         if scope == "memories" || scope == "all" {
-            let memories = store.search_memories(query, limit).await?;
-            if memories.is_empty() {
+            // FTS5 keyword search
+            let fts_results = store.search_memories(query, limit).await.unwrap_or_default();
+
+            // Semantic search via embeddings
+            let semantic_results = if let Some(emb_client) = embeddings {
+                match emb_client.embed(query).await {
+                    Ok(query_vec) => store
+                        .search_by_embedding(&query_vec, limit)
+                        .await
+                        .unwrap_or_default(),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "semantic search failed");
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            };
+
+            // Merge: deduplicate by key
+            let mut seen = std::collections::HashSet::new();
+            let mut merged = Vec::new();
+
+            for m in &fts_results {
+                if seen.insert(m.key.clone()) {
+                    merged.push(format!("- [{}] {}: {}", m.category, m.key, m.content));
+                }
+            }
+
+            for (m, score) in &semantic_results {
+                if *score > 0.5 && seen.insert(m.key.clone()) {
+                    merged.push(format!(
+                        "- [{}] {}: {} (similarity: {:.0}%)",
+                        m.category, m.key, m.content, score * 100.0
+                    ));
+                }
+            }
+
+            if merged.is_empty() {
                 output.push_str("No memories found.\n");
             } else {
-                output.push_str(&format!("Found {} memories:\n", memories.len()));
-                for m in &memories {
-                    output.push_str(&format!("- [{}] {}: {}\n", m.category, m.key, m.content));
+                output.push_str(&format!("Found {} memories:\n", merged.len()));
+                for line in &merged {
+                    output.push_str(line);
+                    output.push('\n');
                 }
             }
         }

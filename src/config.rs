@@ -7,6 +7,8 @@ pub struct Config {
     #[serde(default)]
     pub stt: SttConfig,
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub embeddings: EmbeddingsConfig,
     pub memory: MemoryConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
@@ -67,6 +69,27 @@ impl Default for SchedulerConfig {
             poll_interval_secs: default_poll_interval(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EmbeddingsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+}
+
+impl Default for EmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_embedding_model(),
+        }
+    }
+}
+
+fn default_embedding_model() -> String {
+    "openai/text-embedding-3-small".to_string()
 }
 
 fn default_scheduler_enabled() -> bool {

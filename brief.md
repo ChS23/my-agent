@@ -210,7 +210,8 @@ RUST_LOG=info,agent=debug
 
 **Phase 5 — Polish ✅**
 - [x] FTS5 full-text search (core_memories + messages, auto-synced triggers)
-- [x] `memory_search` tool (FTS5, scope: memories/messages/all)
+- [x] Embeddings semantic search (OpenRouter, cosine similarity, hybrid with FTS5)
+- [x] `memory_search` tool (hybrid: FTS5 + semantic, scope: memories/messages/all)
 - [x] LLM-managed memory extraction (Mem0 паттерн, background after each exchange)
 - [x] Config валидация при старте (timezone, prompt files, limits, model)
 - [x] Hot reload модели (`set_model` / `get_model` tools, RwLock swap)

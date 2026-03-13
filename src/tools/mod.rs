@@ -19,7 +19,7 @@ use anyhow::Result;
 use async_openai::types::chat::ChatCompletionTools;
 use frankenstein::client_reqwest::Bot;
 
-use crate::llm::LlmClient;
+use crate::llm::{EmbeddingClient, LlmClient};
 use crate::memory::MemoryStore;
 use crate::scheduler::store::ScheduleStore;
 use crate::ticktick::TickTickClient;
@@ -36,6 +36,7 @@ pub struct ToolContext<'a> {
     pub chat_id: i64,
     pub thread_id: Option<i32>,
     pub llm: &'a LlmClient,
+    pub embeddings: Option<&'a EmbeddingClient>,
     pub ticktick: Option<&'a TickTickClient>,
 }
 
@@ -77,9 +78,11 @@ pub async fn execute_tool(
     ctx: &ToolContext<'_>,
 ) -> Result<ToolResult> {
     match name {
-        "memory_store" => MemoryStoreTool::execute(arguments, ctx.store).await,
+        "memory_store" => MemoryStoreTool::execute(arguments, ctx.store, ctx.embeddings).await,
         "memory_forget" => MemoryForgetTool::execute(arguments, ctx.store).await,
-        "memory_search" => MemorySearchTool::execute(arguments, ctx.store, ctx.chat_id).await,
+        "memory_search" => {
+            MemorySearchTool::execute(arguments, ctx.store, ctx.chat_id, ctx.embeddings).await
+        }
         "memory_export" => MemoryExportTool::execute(ctx.store).await,
         "web_search" => WebSearchTool::execute(arguments).await,
         "schedule_add" => {
