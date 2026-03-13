@@ -1,0 +1,16 @@
+[agent]
+max_tool_iterations = 10
+max_history_messages = 50
+identity_path = "IDENTITY.md"
+
+[llm]
+model = "google/gemini-3.1-flash-lite-preview"
+temperature = 0.7
+max_tokens = 4096
+
+[telegram]
+allowed_users = ["chs_23"]
+stream_throttle_ms = 300
+
+[memory]
+db_path = "data/agent.db"

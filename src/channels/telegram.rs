@@ -1,0 +1,264 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use frankenstein::client_reqwest::Bot;
+use frankenstein::methods::{
+    EditMessageTextParams, GetUpdatesParams, SendChatActionParams, SendMessageParams,
+};
+use frankenstein::types::ChatAction;
+use frankenstein::types::AllowedUpdate;
+use frankenstein::updates::{Update, UpdateContent};
+use frankenstein::AsyncTelegramApi;
+use tokio::sync::{broadcast, mpsc};
+
+use crate::agent::Agent;
+use crate::config::TelegramConfig;
+
+pub struct TelegramBot {
+    bot: Bot,
+    allowed_users: HashSet<String>,
+    stream_throttle: Duration,
+}
+
+impl TelegramBot {
+    pub fn new(token: &str, config: &TelegramConfig) -> Self {
+        Self {
+            bot: Bot::new(token),
+            allowed_users: config.allowed_users.iter().cloned().collect(),
+            stream_throttle: Duration::from_millis(config.stream_throttle_ms),
+        }
+    }
+
+    /// Main polling loop. Runs until shutdown signal.
+    pub async fn run(
+        self: Arc<Self>,
+        agent: Arc<Agent>,
+        mut shutdown: broadcast::Receiver<()>,
+    ) -> Result<()> {
+        let mut offset: Option<i64> = None;
+
+        tracing::info!(
+            allowed_users = ?self.allowed_users,
+            "telegram bot started polling"
+        );
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.recv() => {
+                    tracing::info!("telegram: shutdown received");
+                    break;
+                }
+                result = self.poll(offset) => {
+                    match result {
+                        Ok(updates) => {
+                            for update in updates {
+                                let new_offset = update.update_id as i64 + 1;
+                                offset = Some(match offset {
+                                    Some(cur) => cur.max(new_offset),
+                                    None => new_offset,
+                                });
+
+                                let bot = Arc::clone(&self);
+                                let agent = Arc::clone(&agent);
+                                tokio::spawn(async move {
+                                    bot.handle_update(&agent, update).await;
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "polling error");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn poll(&self, offset: Option<i64>) -> Result<Vec<Update>> {
+        let mut params = GetUpdatesParams::builder()
+            .timeout(30_u32)
+            .allowed_updates(vec![AllowedUpdate::Message])
+            .build();
+
+        if let Some(off) = offset {
+            params.offset = Some(off);
+        }
+
+        let response = self.bot.get_updates(&params).await?;
+        Ok(response.result)
+    }
+
+    async fn handle_update(&self, agent: &Agent, update: Update) {
+        let message = match update.content {
+            UpdateContent::Message(msg) => msg,
+            _ => return,
+        };
+
+        let text: String = match &message.text {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => return,
+        };
+
+        let chat_id = message.chat.id;
+        let thread_id = message.message_thread_id;
+
+        let username = message
+            .from
+            .as_ref()
+            .and_then(|u| u.username.as_deref())
+            .unwrap_or("");
+
+        if !self.allowed_users.contains("*") && !self.allowed_users.contains(username) {
+            tracing::warn!(username, chat_id, "unauthorized");
+            return;
+        }
+
+        tracing::info!(username, chat_id, len = text.len(), "message");
+
+        // Send typing indicator
+        let mut action_params = SendChatActionParams::builder()
+            .chat_id(chat_id)
+            .action(ChatAction::Typing)
+            .build();
+        if let Some(tid) = thread_id {
+            action_params.message_thread_id = Some(tid);
+        }
+        let _ = self.bot.send_chat_action(&action_params).await;
+
+        let (delta_tx, delta_rx) = mpsc::channel::<String>(128);
+
+        // Send placeholder message for streaming edits
+        let mut placeholder = SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text("⏳")
+            .build();
+        if let Some(tid) = thread_id {
+            placeholder.message_thread_id = Some(tid);
+        }
+
+        let msg_id = match self.bot.send_message(&placeholder).await {
+            Ok(resp) => Some(resp.result.message_id),
+            Err(_) => None,
+        };
+
+        // Spawn streaming display
+        let bot = self.bot.clone();
+        let throttle = self.stream_throttle;
+        let stream_handle =
+            tokio::spawn(Self::stream_to_telegram(bot, chat_id, msg_id, throttle, delta_rx));
+
+        // Process message (drives delta_tx via LLM streaming)
+        let result = agent
+            .process_message(chat_id, thread_id, &text, delta_tx, &self.bot)
+            .await;
+
+        // Wait for streaming task
+        let _ = stream_handle.await;
+
+        // Edit with final text (or send new if no placeholder)
+        match result {
+            Ok(ref final_text) => {
+                if let Some(mid) = msg_id {
+                    self.edit_message(chat_id, mid, final_text).await;
+                } else {
+                    self.send_final(chat_id, thread_id, final_text).await;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, chat_id, "agent error");
+                let err_text = "Произошла ошибка.";
+                if let Some(mid) = msg_id {
+                    self.edit_message(chat_id, mid, err_text).await;
+                } else {
+                    self.send_final(chat_id, thread_id, err_text).await;
+                }
+            }
+        }
+    }
+
+    async fn stream_to_telegram(
+        bot: Bot,
+        chat_id: i64,
+        msg_id: Option<i32>,
+        throttle: Duration,
+        mut rx: mpsc::Receiver<String>,
+    ) {
+        let msg_id = match msg_id {
+            Some(id) => id,
+            None => {
+                // Drain the channel
+                while rx.recv().await.is_some() {}
+                return;
+            }
+        };
+
+        let mut accumulated = String::new();
+        let mut last_edit = Instant::now() - throttle; // allow immediate first edit
+        let mut pending_edit: Option<tokio::task::JoinHandle<()>> = None;
+
+        while let Some(delta) = rx.recv().await {
+            accumulated.push_str(&delta);
+
+            // Check if previous edit is done
+            if let Some(ref handle) = pending_edit {
+                if !handle.is_finished() {
+                    continue; // still editing, skip
+                }
+            }
+
+            if accumulated.len() > 5 && last_edit.elapsed() >= throttle {
+                let display = format!("{}▍", &accumulated);
+                let bot_clone = bot.clone();
+                pending_edit = Some(tokio::spawn(async move {
+                    let params = EditMessageTextParams::builder()
+                        .chat_id(chat_id)
+                        .message_id(msg_id)
+                        .text(&display)
+                        .build();
+                    if let Err(e) = bot_clone.edit_message_text(&params).await {
+                        tracing::debug!(error = %e, "stream edit failed");
+                    }
+                }));
+                last_edit = Instant::now();
+            }
+        }
+
+        // Wait for last pending edit
+        if let Some(handle) = pending_edit {
+            let _ = handle.await;
+        }
+    }
+
+    async fn edit_message(&self, chat_id: i64, message_id: i32, text: &str) {
+        let params = EditMessageTextParams::builder()
+            .chat_id(chat_id)
+            .message_id(message_id)
+            .text(text)
+            .build();
+
+        if let Err(e) = self.bot.edit_message_text(&params).await {
+            tracing::error!(error = %e, chat_id, "edit failed");
+        }
+    }
+
+    async fn send_final(&self, chat_id: i64, thread_id: Option<i32>, text: &str) {
+        let mut params = SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text(text)
+            .build();
+
+        if let Some(tid) = thread_id {
+            params.message_thread_id = Some(tid);
+        }
+
+        if let Err(e) = self.bot.send_message(&params).await {
+            tracing::error!(error = %e, chat_id, "send failed");
+        }
+    }
+}
