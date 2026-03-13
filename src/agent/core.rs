@@ -10,11 +10,13 @@ use tokio::sync::mpsc;
 use crate::config::AgentConfig;
 use crate::llm::LlmClient;
 use crate::memory::MemoryStore;
+use crate::scheduler::store::ScheduleStore;
 use crate::tools::ToolContext;
 
 pub struct Agent {
     llm: LlmClient,
     memory: MemoryStore,
+    schedule_store: ScheduleStore,
     identity: String,
     config: AgentConfig,
 }
@@ -23,12 +25,14 @@ impl Agent {
     pub fn new(
         llm: LlmClient,
         memory: MemoryStore,
+        schedule_store: ScheduleStore,
         identity: String,
         config: AgentConfig,
     ) -> Self {
         Self {
             llm,
             memory,
+            schedule_store,
             identity,
             config,
         }
@@ -141,8 +145,10 @@ impl Agent {
             // Execute tools and add results
             let tool_ctx = ToolContext {
                 store: &self.memory,
+                schedule_store: &self.schedule_store,
                 bot,
                 chat_id,
+                thread_id,
             };
             for tc in &result.tool_calls {
                 let tool_result = crate::tools::execute_tool(

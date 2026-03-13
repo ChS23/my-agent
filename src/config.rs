@@ -8,6 +8,8 @@ pub struct Config {
     pub stt: SttConfig,
     pub telegram: TelegramConfig,
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -46,6 +48,30 @@ pub struct TelegramConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryConfig {
     pub db_path: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SchedulerConfig {
+    #[serde(default = "default_scheduler_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_scheduler_enabled(),
+            poll_interval_secs: default_poll_interval(),
+        }
+    }
+}
+
+fn default_scheduler_enabled() -> bool {
+    true
+}
+fn default_poll_interval() -> u64 {
+    15
 }
 
 fn default_stt_api_base() -> String {

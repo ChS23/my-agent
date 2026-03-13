@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod llm;
 mod memory;
+mod scheduler;
 mod tools;
 
 use std::sync::Arc;
@@ -46,6 +47,12 @@ async fn main() -> Result<()> {
     let memory = memory::MemoryStore::new(&cfg.memory.db_path).await?;
     tracing::info!(db = %cfg.memory.db_path, "memory store initialized");
 
+    // Init scheduler store (separate DB to avoid SQLite lock conflicts)
+    let sched_db = cfg.memory.db_path.replace(".db", "_sched.db");
+    let sched = scheduler::Scheduler::new(&sched_db, cfg.scheduler.clone()).await?;
+    let schedule_store = sched.store().clone();
+    tracing::info!(db = %sched_db, "scheduler store initialized");
+
     // Init LLM client
     let api_key = std::env::var("LLM_API_KEY")
         .or_else(|_| std::env::var("OPENROUTER_API_KEY"))
@@ -59,7 +66,13 @@ async fn main() -> Result<()> {
     );
 
     // Init agent
-    let agent = Arc::new(agent::Agent::new(llm, memory, identity, cfg.agent.clone()));
+    let agent = Arc::new(agent::Agent::new(
+        llm,
+        memory,
+        schedule_store,
+        identity,
+        cfg.agent.clone(),
+    ));
 
     // Init STT client (optional — for voice messages)
     let stt = std::env::var("GROQ_API_KEY").ok().map(|key| {
@@ -74,7 +87,8 @@ async fn main() -> Result<()> {
 
     // Graceful shutdown
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
-    let shutdown_rx = shutdown_tx.subscribe();
+    let tg_shutdown = shutdown_tx.subscribe();
+    let sched_shutdown = shutdown_tx.subscribe();
 
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
@@ -82,8 +96,19 @@ async fn main() -> Result<()> {
         shutdown_tx.send(()).ok();
     });
 
+    // Start scheduler (if enabled)
+    let bot_for_sched = Arc::new(frankenstein::client_reqwest::Bot::new(&bot_token));
+    if cfg.scheduler.enabled {
+        let agent_clone = Arc::clone(&agent);
+        tokio::spawn(async move {
+            if let Err(e) = sched.run(agent_clone, bot_for_sched, sched_shutdown).await {
+                tracing::error!(error = %e, "scheduler error");
+            }
+        });
+    }
+
     // Run telegram polling (blocks until shutdown)
-    telegram.run(agent, shutdown_rx).await?;
+    telegram.run(agent, tg_shutdown).await?;
 
     tracing::info!("agent stopped");
     Ok(())

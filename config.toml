@@ -14,5 +14,9 @@ max_tokens = 4096
 allowed_users = ["chs_23"]
 stream_throttle_ms = 300
 
+[scheduler]
+enabled = true
+poll_interval_secs = 15
+
 [memory]
 db_path = "data/agent.db"

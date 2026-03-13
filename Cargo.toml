@@ -29,6 +29,13 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Web search (DuckDuckGo HTML parsing)
+scraper = "0.22"
+
+# Scheduler
+cron = "0.15"
+chrono-tz = "0.10"
+
 # Errors
 anyhow = "1"
 thiserror = "2"
