@@ -1,5 +1,21 @@
 /target
 .env
-data/*.db
-data/*.db-journal
-data/*.db-wal
+
+# Data directory (SQLite DBs, embeddings, etc.)
+/data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.so
+*.dylib
