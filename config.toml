@@ -13,7 +13,7 @@ max_tokens = 4096
 
 [embeddings]
 enabled = true
-model = "openai/text-embedding-3-small"
+model = "qwen/qwen3-embedding-8b"
 
 [telegram]
 allowed_users = ["chs_23"]

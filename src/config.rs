@@ -89,7 +89,7 @@ impl Default for EmbeddingsConfig {
 }
 
 fn default_embedding_model() -> String {
-    "openai/text-embedding-3-small".to_string()
+    "qwen/qwen3-embedding-8b".to_string()
 }
 
 fn default_scheduler_enabled() -> bool {
