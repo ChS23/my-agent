@@ -7,6 +7,7 @@ use frankenstein::client_reqwest::Bot;
 use frankenstein::methods::{
     EditMessageTextParams, GetUpdatesParams, SendChatActionParams, SendMessageParams,
 };
+use frankenstein::methods::AnswerCallbackQueryParams;
 use frankenstein::types::{AllowedUpdate, ChatAction};
 use frankenstein::ParseMode;
 use frankenstein::updates::{Update, UpdateContent};
@@ -88,7 +89,7 @@ impl TelegramBot {
     async fn poll(&self, offset: Option<i64>) -> Result<Vec<Update>> {
         let mut params = GetUpdatesParams::builder()
             .timeout(30_u32)
-            .allowed_updates(vec![AllowedUpdate::Message])
+            .allowed_updates(vec![AllowedUpdate::Message, AllowedUpdate::CallbackQuery])
             .build();
 
         if let Some(off) = offset {
@@ -100,6 +101,12 @@ impl TelegramBot {
     }
 
     async fn handle_update(&self, agent: &Agent, update: Update) {
+        // Handle callback queries (inline button clicks)
+        if let UpdateContent::CallbackQuery(callback) = &update.content {
+            self.handle_callback(agent, callback).await;
+            return;
+        }
+
         let message = match update.content {
             UpdateContent::Message(msg) => msg,
             _ => return,
@@ -293,6 +300,92 @@ impl TelegramBot {
         // Wait for last pending edit
         if let Some(handle) = pending_edit {
             let _ = handle.await;
+        }
+    }
+
+    async fn handle_callback(&self, agent: &Agent, callback: &frankenstein::types::CallbackQuery) {
+        // Answer callback to remove loading spinner
+        let answer = AnswerCallbackQueryParams::builder()
+            .callback_query_id(&callback.id)
+            .build();
+        let _ = self.bot.answer_callback_query(&answer).await;
+
+        let data = match callback.data.as_deref() {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => return,
+        };
+
+        let message = match &callback.message {
+            Some(msg) => msg,
+            None => return,
+        };
+
+        // Extract chat_id and thread_id from the original message
+        let (chat_id, thread_id) = match message {
+            frankenstein::types::MaybeInaccessibleMessage::Message(msg) => {
+                (msg.chat.id, msg.message_thread_id)
+            }
+            frankenstein::types::MaybeInaccessibleMessage::InaccessibleMessage(msg) => {
+                (msg.chat.id, None)
+            }
+        };
+
+        let username = callback
+            .from
+            .username
+            .as_deref()
+            .unwrap_or("");
+
+        if !self.allowed_users.contains("*") && !self.allowed_users.contains(username) {
+            return;
+        }
+
+        tracing::info!(username, chat_id, data = %data, "button clicked");
+
+        // Process as a regular message
+        let (delta_tx, delta_rx) = mpsc::channel::<String>(128);
+
+        let mut placeholder = SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text("⏳")
+            .build();
+        if let Some(tid) = thread_id {
+            placeholder.message_thread_id = Some(tid);
+        }
+
+        let msg_id = match self.bot.send_message(&placeholder).await {
+            Ok(resp) => Some(resp.result.message_id),
+            Err(_) => None,
+        };
+
+        let bot = self.bot.clone();
+        let throttle = self.stream_throttle;
+        let stream_handle =
+            tokio::spawn(Self::stream_to_telegram(bot, chat_id, msg_id, throttle, delta_rx));
+
+        let result = agent
+            .process_message(chat_id, thread_id, &data, &[], delta_tx, &self.bot)
+            .await;
+
+        let _ = stream_handle.await;
+
+        match result {
+            Ok(ref final_text) => {
+                if let Some(mid) = msg_id {
+                    self.edit_message(chat_id, mid, final_text).await;
+                } else {
+                    self.send_final(chat_id, thread_id, final_text).await;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, chat_id, "agent error (callback)");
+                let err_text = "Произошла ошибка.";
+                if let Some(mid) = msg_id {
+                    self.edit_message(chat_id, mid, err_text).await;
+                } else {
+                    self.send_final(chat_id, thread_id, err_text).await;
+                }
+            }
         }
     }
 
