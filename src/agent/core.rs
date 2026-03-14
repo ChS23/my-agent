@@ -12,6 +12,7 @@ use crate::config::AgentConfig;
 use crate::llm::{EmbeddingClient, LlmClient};
 use crate::memory::MemoryStore;
 use crate::scheduler::store::ScheduleStore;
+use crate::skills::Skill;
 use crate::ticktick::TickTickClient;
 use crate::tools::ToolContext;
 use frankenstein::methods::EditForumTopicParams;
@@ -25,6 +26,7 @@ pub struct Agent {
     ticktick: Option<TickTickClient>,
     identity: String,
     config: AgentConfig,
+    skills: Vec<Skill>,
 }
 
 impl Agent {
@@ -36,6 +38,7 @@ impl Agent {
         ticktick: Option<TickTickClient>,
         identity: String,
         config: AgentConfig,
+        skills: Vec<Skill>,
     ) -> Self {
         Self {
             llm,
@@ -45,6 +48,7 @@ impl Agent {
             ticktick,
             identity,
             config,
+            skills,
         }
     }
 
@@ -101,7 +105,7 @@ impl Agent {
         let mut messages =
             crate::llm::openrouter::build_messages(&system_prompt, &history, user_message, image_urls);
 
-        let tool_specs = crate::tools::tool_specs(self.ticktick.is_some());
+        let tool_specs = crate::tools::tool_specs(self.ticktick.is_some(), &self.skills);
 
         for iteration in 0..self.config.max_tool_iterations {
             let mut builder = CreateChatCompletionRequestArgs::default();
@@ -175,6 +179,7 @@ impl Agent {
                 llm: &self.llm,
                 embeddings: self.embeddings.as_ref(),
                 ticktick: self.ticktick.as_ref(),
+                skills: &self.skills,
             };
             for tc in &result.tool_calls {
                 let tool_result = crate::tools::execute_tool(

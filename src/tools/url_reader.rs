@@ -95,7 +95,7 @@ fn extract_text_from_html(html: &str) -> String {
     let document = scraper::Html::parse_document(html);
 
     // Remove script and style elements
-    let skip_tags = ["script", "style", "noscript", "nav", "footer", "header"];
+    let _skip_tags = ["script", "style", "noscript", "nav", "footer", "header"];
 
     let mut text = String::new();
 

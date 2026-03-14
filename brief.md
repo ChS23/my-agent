@@ -33,7 +33,7 @@
 ## Архитектура
 
 ```
-Telegram (frankenstein long poll + editMessageText streaming)
+Telegram (frankenstein long poll + sendMessageDraft streaming)
       │
       ├── Voice? → Groq Whisper STT → text
       │
@@ -52,15 +52,16 @@ Telegram (frankenstein long poll + editMessageText streaming)
       │       ├── WebSearch (DuckDuckGo)
       │       ├── TickTick (OAuth2 + CRUD tasks)
       │       └── ... расширяемо через tool_specs + execute_tool
+      ├── Skills (markdown-based, lazy loading, /invoke)
       └── LLM Provider (configurable api_base: OpenRouter, Groq, etc.)
             │
             ▼
-      Stream deltas ──► editMessageText (throttled) ──► final edit с HTML
+      Stream deltas ──► sendMessageDraft (Bot API 9.5) ──► sendMessage с HTML + buttons
 ```
 
 ### Ключевые принципы
 
-- **Стриминг через `editMessageText`** — placeholder "⏳" → throttled edits с cursor "▍" → final edit с `ParseMode::Html`
+- **Стриминг через `sendMessageDraft`** (Bot API 9.5) — нативный draft bubble → `sendMessage` с HTML + inline buttons
 - **Non-blocking edits** — каждый edit спавнится как отдельная tokio task, не блокирует receive loop
 - **Per-thread sessions** — `(chat_id, thread_id)` как ключ сессии в SQLite
 - **Tool dispatch в цикле** — лимит `max_tool_iterations` защищает от бесконечного цикла
@@ -88,7 +89,7 @@ src/
 │
 ├── channels/
 │   ├── mod.rs
-│   ├── telegram.rs        # long poll, editMessageText streaming, voice transcription
+│   ├── telegram.rs        # long poll, sendMessageDraft streaming, voice, buttons, vision
 │   └── format.rs          # md_to_telegram_html (unused, kept as fallback)
 │
 ├── tools/
@@ -98,6 +99,7 @@ src/
 │   ├── web_search.rs      # DuckDuckGo HTML scraping
 │   ├── schedule.rs        # schedule_add / schedule_list / schedule_cancel
 │   ├── model.rs           # set_model / get_model (hot reload)
+│   ├── url_reader.rs      # read_url (HTML→text extraction)
 │   └── ticktick.rs        # TickTick auth/create/list/complete/delete
 │
 ├── scheduler/
@@ -113,10 +115,16 @@ src/
 │   ├── mod.rs
 │   └── store.rs           # SQLite: core_memories + messages (per-thread)
 │
+├── skills.rs              # skill loader: YAML frontmatter + markdown, lazy loading
+│
 └── llm/
     ├── mod.rs
     ├── openrouter.rs       # LlmClient: configurable api_base, streaming, tool calls
+    ├── embeddings.rs       # EmbeddingClient: OpenRouter /embeddings API, cosine similarity
     └── stt.rs              # SttClient: Groq Whisper multipart upload (in-memory)
+
+skills/
+└── weekly_review.md       # скилл: анализ недели
 
 SOUL.md                    # личность, язык, тон
 IDENTITY.md                # роль, правила поведения
@@ -216,3 +224,12 @@ RUST_LOG=info,agent=debug
 - [x] Config валидация при старте (timezone, prompt files, limits, model)
 - [x] Hot reload модели (`set_model` / `get_model` tools, RwLock swap)
 - [x] `memory_export` tool (snapshot all memories grouped by category)
+
+**Phase 6 — Skills + Streaming ✅**
+- [x] sendMessageDraft стриминг (Bot API 9.5, нативный draft bubble)
+- [x] Inline keyboard buttons из LLM response (```buttons blocks)
+- [x] Vision — анализ фото (base64 multimodal)
+- [x] URL reader tool (HTML→text extraction)
+- [x] Callback query handling (inline button clicks)
+- [x] Skills system (markdown + YAML frontmatter, lazy loading, /invoke)
+- [x] weekly_review skill

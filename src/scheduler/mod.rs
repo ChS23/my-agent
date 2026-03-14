@@ -9,7 +9,7 @@ use crate::agent::Agent;
 use crate::config::SchedulerConfig;
 use frankenstein::client_reqwest::Bot;
 
-pub use store::{Job, Schedule};
+pub use store::Schedule;
 use store::ScheduleStore;
 
 pub struct Scheduler {

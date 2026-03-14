@@ -87,6 +87,7 @@ impl TickTickClient {
     }
 
     /// Update a task.
+    #[allow(dead_code)]
     pub async fn update_task(&self, task_id: &str, task: &Task) -> Result<Task> {
         let auth = self.auth_header().await?;
         let resp = self

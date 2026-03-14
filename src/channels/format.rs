@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 /// Convert markdown to Telegram-compatible HTML.
 ///
 /// Supports: **bold**, *italic*, `code`, ```pre```, [links](url),

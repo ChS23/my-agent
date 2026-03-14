@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("LLM provider error: {0}")]

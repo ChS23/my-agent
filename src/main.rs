@@ -5,6 +5,7 @@ mod error;
 mod llm;
 mod memory;
 mod scheduler;
+mod skills;
 mod ticktick;
 mod tools;
 
@@ -43,6 +44,9 @@ async fn main() -> Result<()> {
         identity.push_str("\n\n");
         tracing::info!(path = %path, "prompt loaded");
     }
+
+    // Load skills (descriptions are injected via use_skill tool spec)
+    let skills_list = skills::load_skills(std::path::Path::new("skills"))?;
 
     // Init memory store
     let memory = memory::MemoryStore::new(&cfg.memory.db_path).await?;
@@ -95,6 +99,39 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Bot token (needed for skill commands and later for bot init)
+    let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
+        .map_err(|_| anyhow::anyhow!("TELEGRAM_BOT_TOKEN not set"))?;
+
+    // Register skill commands in Telegram bot menu
+    {
+        use frankenstein::client_reqwest::Bot;
+        use frankenstein::methods::SetMyCommandsParams;
+        use frankenstein::types::BotCommand;
+        use frankenstein::AsyncTelegramApi;
+
+        let commands: Vec<BotCommand> = skills_list
+            .iter()
+            .map(|s| {
+                let desc = if s.description.len() > 256 {
+                    format!("{}…", &s.description[..255])
+                } else {
+                    s.description.clone()
+                };
+                BotCommand::builder().command(&s.name).description(desc).build()
+            })
+            .collect();
+
+        if !commands.is_empty() {
+            let bot = Bot::new(&bot_token);
+            let params = SetMyCommandsParams::builder().commands(commands.clone()).build();
+            match bot.set_my_commands(&params).await {
+                Ok(_) => tracing::info!(count = commands.len(), "bot commands registered"),
+                Err(e) => tracing::warn!(error = %e, "failed to register bot commands"),
+            }
+        }
+    }
+
     // Init agent
     let agent = Arc::new(agent::Agent::new(
         llm,
@@ -104,6 +141,7 @@ async fn main() -> Result<()> {
         ticktick_client,
         identity,
         cfg.agent.clone(),
+        skills_list,
     ));
 
     // Init STT client (optional — for voice messages)
@@ -113,8 +151,6 @@ async fn main() -> Result<()> {
     });
 
     // Init telegram bot
-    let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
-        .map_err(|_| anyhow::anyhow!("TELEGRAM_BOT_TOKEN not set"))?;
     let telegram = Arc::new(channels::TelegramBot::new(&bot_token, &cfg.telegram, stt));
 
     // Graceful shutdown

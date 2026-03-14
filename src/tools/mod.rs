@@ -1,6 +1,8 @@
+mod dice;
 mod memory;
 mod model;
 mod schedule;
+mod skills;
 mod ticktick;
 mod topics;
 mod url_reader;
@@ -24,6 +26,7 @@ use frankenstein::client_reqwest::Bot;
 use crate::llm::{EmbeddingClient, LlmClient};
 use crate::memory::MemoryStore;
 use crate::scheduler::store::ScheduleStore;
+use crate::skills::Skill;
 use crate::ticktick::TickTickClient;
 
 pub struct ToolResult {
@@ -40,10 +43,11 @@ pub struct ToolContext<'a> {
     pub llm: &'a LlmClient,
     pub embeddings: Option<&'a EmbeddingClient>,
     pub ticktick: Option<&'a TickTickClient>,
+    pub skills: &'a [Skill],
 }
 
 /// Return OpenAI-format tool specs for all available tools.
-pub fn tool_specs(has_ticktick: bool) -> Vec<ChatCompletionTools> {
+pub fn tool_specs(has_ticktick: bool, skills: &[Skill]) -> Vec<ChatCompletionTools> {
     let mut specs = vec![
         MemoryStoreTool::spec(),
         MemoryForgetTool::spec(),
@@ -61,6 +65,7 @@ pub fn tool_specs(has_ticktick: bool) -> Vec<ChatCompletionTools> {
         SetModelTool::spec(),
         GetModelTool::spec(),
         UrlReaderTool::spec(),
+        dice::SendDiceTool::spec(),
     ];
 
     if has_ticktick {
@@ -70,6 +75,13 @@ pub fn tool_specs(has_ticktick: bool) -> Vec<ChatCompletionTools> {
         specs.push(TickTickCompleteTool::spec());
         specs.push(TickTickDeleteTool::spec());
     }
+
+    // Dynamic skill tools
+    if let Some(skill_spec) = skills::UseSkillTool::spec(skills) {
+        specs.push(skill_spec);
+    }
+    specs.push(skills::WriteSkillTool::spec());
+    specs.push(skills::RestartAgentTool::spec());
 
     specs
 }
@@ -124,6 +136,10 @@ pub async fn execute_tool(
         "set_model" => SetModelTool::execute(arguments, ctx.llm).await,
         "get_model" => GetModelTool::execute(ctx.llm).await,
         "read_url" => UrlReaderTool::execute(arguments).await,
+        "send_dice" => dice::SendDiceTool::execute(arguments, ctx.bot, ctx.chat_id, ctx.thread_id).await,
+        "use_skill" => Ok(skills::UseSkillTool::execute(arguments, ctx.skills)?),
+        "write_skill" => Ok(skills::WriteSkillTool::execute(arguments)?),
+        "restart_agent" => Ok(skills::RestartAgentTool::execute(arguments, ctx.bot, ctx.chat_id, ctx.thread_id)?),
         _ => Ok(ToolResult {
             output: format!("Unknown tool: {name}"),
         }),
