@@ -252,7 +252,11 @@ impl TelegramBot {
             }
 
             if accumulated.len() > 5 && last_send.elapsed() >= throttle {
-                let text = accumulated.clone();
+                // Strip ```buttons block so user doesn't see raw JSON in draft
+                let text = match accumulated.find("```buttons") {
+                    Some(pos) => accumulated[..pos].trim_end().to_string(),
+                    None => accumulated.clone(),
+                };
                 let bot_clone = bot.clone();
                 pending = Some(tokio::spawn(async move {
                     let mut params = SendMessageDraftParams::builder()
