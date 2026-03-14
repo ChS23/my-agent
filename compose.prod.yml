@@ -9,8 +9,7 @@ services:
       - TZ=Europe/Moscow
     volumes:
       - agent-data:/app/data
-      - agent-skills:/app/skills
+      - ./skills:/app/skills
 
 volumes:
   agent-data:
-  agent-skills:
