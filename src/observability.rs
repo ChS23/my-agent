@@ -19,7 +19,7 @@ pub fn init_langfuse() -> Result<Option<SdkTracerProvider>> {
     use base64::Engine;
     let auth = base64::engine::general_purpose::STANDARD.encode(format!("{public_key}:{secret_key}"));
 
-    let endpoint = format!("{host}/api/public/otel");
+    let endpoint = format!("{host}/api/public/otel/v1/traces");
 
     let exporter = SpanExporter::builder()
         .with_http()
