@@ -13,6 +13,7 @@ pub fn init_langfuse() -> Result<Option<SdkTracerProvider>> {
     let secret_key = std::env::var("LANGFUSE_SECRET_KEY")
         .map_err(|_| anyhow::anyhow!("LANGFUSE_SECRET_KEY required when LANGFUSE_PUBLIC_KEY is set"))?;
     let host = std::env::var("LANGFUSE_HOST")
+        .or_else(|_| std::env::var("LANGFUSE_BASE_URL"))
         .unwrap_or_else(|_| "https://cloud.langfuse.com".to_string());
 
     // Langfuse expects Basic auth: base64(public_key:secret_key)
