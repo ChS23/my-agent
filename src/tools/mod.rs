@@ -1,4 +1,3 @@
-mod buttons;
 mod memory;
 mod model;
 mod schedule;
@@ -7,7 +6,6 @@ mod topics;
 mod url_reader;
 mod web_search;
 
-pub use buttons::SendButtonsTool;
 pub use memory::MemoryExportTool;
 pub use memory::MemoryForgetTool;
 pub use memory::MemorySearchTool;
@@ -63,7 +61,6 @@ pub fn tool_specs(has_ticktick: bool) -> Vec<ChatCompletionTools> {
         SetModelTool::spec(),
         GetModelTool::spec(),
         UrlReaderTool::spec(),
-        SendButtonsTool::spec(),
     ];
 
     if has_ticktick {
@@ -127,9 +124,6 @@ pub async fn execute_tool(
         "set_model" => SetModelTool::execute(arguments, ctx.llm).await,
         "get_model" => GetModelTool::execute(ctx.llm).await,
         "read_url" => UrlReaderTool::execute(arguments).await,
-        "send_buttons" => {
-            SendButtonsTool::execute(arguments, ctx.bot, ctx.chat_id, ctx.thread_id).await
-        }
         _ => Ok(ToolResult {
             output: format!("Unknown tool: {name}"),
         }),

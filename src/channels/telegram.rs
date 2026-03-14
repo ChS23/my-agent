@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use frankenstein::client_reqwest::Bot;
 use frankenstein::methods::{
-    EditMessageTextParams, GetUpdatesParams, SendChatActionParams, SendMessageParams,
+    GetUpdatesParams, SendChatActionParams, SendMessageDraftParams, SendMessageParams,
 };
 use frankenstein::methods::AnswerCallbackQueryParams;
-use frankenstein::types::{AllowedUpdate, ChatAction};
+use frankenstein::types::{AllowedUpdate, ChatAction, InlineKeyboardButton, InlineKeyboardMarkup, ReplyMarkup};
 use frankenstein::ParseMode;
 use frankenstein::updates::{Update, UpdateContent};
 use frankenstein::AsyncTelegramApi;
@@ -186,25 +186,11 @@ impl TelegramBot {
 
         let (delta_tx, delta_rx) = mpsc::channel::<String>(128);
 
-        // Send placeholder message for streaming edits
-        let mut placeholder = SendMessageParams::builder()
-            .chat_id(chat_id)
-            .text("⏳")
-            .build();
-        if let Some(tid) = thread_id {
-            placeholder.message_thread_id = Some(tid);
-        }
-
-        let msg_id = match self.bot.send_message(&placeholder).await {
-            Ok(resp) => Some(resp.result.message_id),
-            Err(_) => None,
-        };
-
-        // Spawn streaming display
+        // Spawn draft-based streaming display (no placeholder needed)
         let bot = self.bot.clone();
         let throttle = self.stream_throttle;
         let stream_handle =
-            tokio::spawn(Self::stream_to_telegram(bot, chat_id, msg_id, throttle, delta_rx));
+            tokio::spawn(Self::stream_to_telegram(bot, chat_id, thread_id, throttle, delta_rx));
 
         // Process message (drives delta_tx via LLM streaming)
         let result = agent
@@ -214,91 +200,78 @@ impl TelegramBot {
         // Wait for streaming task
         let _ = stream_handle.await;
 
-        // Edit with final text (or send new if no placeholder)
+        // Send final message (replaces draft automatically)
         match result {
             Ok(ref final_text) => {
-                if let Some(mid) = msg_id {
-                    self.edit_message(chat_id, mid, final_text).await;
-                } else {
-                    self.send_final(chat_id, thread_id, final_text).await;
-                }
+                let (clean_text, buttons) = Self::extract_buttons(final_text);
+                self.send_final_with_buttons(chat_id, thread_id, &clean_text, buttons)
+                    .await;
 
                 // Background tasks: auto-name topic + extract memories
-                let text_clone = text.clone();
-                let final_clone = final_text.clone();
                 agent
-                    .maybe_name_topic(
-                        chat_id,
-                        thread_id,
-                        &text_clone,
-                        &final_clone,
-                        &self.bot,
-                    )
+                    .maybe_name_topic(chat_id, thread_id, &text, final_text, &self.bot)
                     .await;
 
                 agent.extract_memories(&text, final_text).await;
             }
             Err(e) => {
                 tracing::error!(error = %e, chat_id, "agent error");
-                let err_text = "Произошла ошибка.";
-                if let Some(mid) = msg_id {
-                    self.edit_message(chat_id, mid, err_text).await;
-                } else {
-                    self.send_final(chat_id, thread_id, err_text).await;
-                }
+                self.send_final(chat_id, thread_id, "Произошла ошибка.")
+                    .await;
             }
         }
     }
 
+    /// Stream LLM output to Telegram using sendMessageDraft (Bot API 9.5).
+    /// Shows text as a typing draft that the bot is composing — no placeholder message needed.
     async fn stream_to_telegram(
         bot: Bot,
         chat_id: i64,
-        msg_id: Option<i32>,
+        thread_id: Option<i32>,
         throttle: Duration,
         mut rx: mpsc::Receiver<String>,
     ) {
-        let msg_id = match msg_id {
-            Some(id) => id,
-            None => {
-                // Drain the channel
-                while rx.recv().await.is_some() {}
-                return;
-            }
-        };
+        // Generate a unique draft_id from current timestamp nanos
+        let draft_id = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as i32)
+            .wrapping_abs();
 
         let mut accumulated = String::new();
-        let mut last_edit = Instant::now() - throttle; // allow immediate first edit
-        let mut pending_edit: Option<tokio::task::JoinHandle<()>> = None;
+        let mut last_send = Instant::now() - throttle;
+        let mut pending: Option<tokio::task::JoinHandle<()>> = None;
 
         while let Some(delta) = rx.recv().await {
             accumulated.push_str(&delta);
 
-            // Check if previous edit is done
-            if let Some(ref handle) = pending_edit {
+            if let Some(ref handle) = pending {
                 if !handle.is_finished() {
-                    continue; // still editing, skip
+                    continue;
                 }
             }
 
-            if accumulated.len() > 5 && last_edit.elapsed() >= throttle {
-                let display = format!("{}▍", &accumulated);
+            if accumulated.len() > 5 && last_send.elapsed() >= throttle {
+                let text = accumulated.clone();
                 let bot_clone = bot.clone();
-                pending_edit = Some(tokio::spawn(async move {
-                    let params = EditMessageTextParams::builder()
+                pending = Some(tokio::spawn(async move {
+                    let mut params = SendMessageDraftParams::builder()
                         .chat_id(chat_id)
-                        .message_id(msg_id)
-                        .text(&display)
+                        .text(&text)
+                        .draft_id(draft_id)
                         .build();
-                    if let Err(e) = bot_clone.edit_message_text(&params).await {
-                        tracing::debug!(error = %e, "stream edit failed");
+                    if let Some(tid) = thread_id {
+                        params.message_thread_id = Some(tid);
+                    }
+                    if let Err(e) = bot_clone.send_message_draft(&params).await {
+                        tracing::debug!(error = %e, "draft send failed");
                     }
                 }));
-                last_edit = Instant::now();
+                last_send = Instant::now();
             }
         }
 
-        // Wait for last pending edit
-        if let Some(handle) = pending_edit {
+        if let Some(handle) = pending {
             let _ = handle.await;
         }
     }
@@ -342,26 +315,12 @@ impl TelegramBot {
 
         tracing::info!(username, chat_id, data = %data, "button clicked");
 
-        // Process as a regular message
         let (delta_tx, delta_rx) = mpsc::channel::<String>(128);
-
-        let mut placeholder = SendMessageParams::builder()
-            .chat_id(chat_id)
-            .text("⏳")
-            .build();
-        if let Some(tid) = thread_id {
-            placeholder.message_thread_id = Some(tid);
-        }
-
-        let msg_id = match self.bot.send_message(&placeholder).await {
-            Ok(resp) => Some(resp.result.message_id),
-            Err(_) => None,
-        };
 
         let bot = self.bot.clone();
         let throttle = self.stream_throttle;
         let stream_handle =
-            tokio::spawn(Self::stream_to_telegram(bot, chat_id, msg_id, throttle, delta_rx));
+            tokio::spawn(Self::stream_to_telegram(bot, chat_id, thread_id, throttle, delta_rx));
 
         let result = agent
             .process_message(chat_id, thread_id, &data, &[], delta_tx, &self.bot)
@@ -371,20 +330,14 @@ impl TelegramBot {
 
         match result {
             Ok(ref final_text) => {
-                if let Some(mid) = msg_id {
-                    self.edit_message(chat_id, mid, final_text).await;
-                } else {
-                    self.send_final(chat_id, thread_id, final_text).await;
-                }
+                let (clean_text, buttons) = Self::extract_buttons(final_text);
+                self.send_final_with_buttons(chat_id, thread_id, &clean_text, buttons)
+                    .await;
             }
             Err(e) => {
                 tracing::error!(error = %e, chat_id, "agent error (callback)");
-                let err_text = "Произошла ошибка.";
-                if let Some(mid) = msg_id {
-                    self.edit_message(chat_id, mid, err_text).await;
-                } else {
-                    self.send_final(chat_id, thread_id, err_text).await;
-                }
+                self.send_final(chat_id, thread_id, "Произошла ошибка.")
+                    .await;
             }
         }
     }
@@ -440,16 +393,99 @@ impl TelegramBot {
         stt.transcribe(bytes.to_vec(), "voice.ogg").await
     }
 
-    async fn edit_message(&self, chat_id: i64, message_id: i32, text: &str) {
-        let params = EditMessageTextParams::builder()
+    /// Extract ```buttons JSON block from response text.
+    /// Returns (clean_text, optional button rows).
+    fn extract_buttons(text: &str) -> (String, Option<Vec<Vec<InlineKeyboardButton>>>) {
+        // Find ```buttons ... ``` block
+        let marker_start = "```buttons";
+        let marker_end = "```";
+
+        let start = match text.find(marker_start) {
+            Some(pos) => pos,
+            None => return (text.to_string(), None),
+        };
+
+        let json_start = start + marker_start.len();
+        let end = match text[json_start..].find(marker_end) {
+            Some(pos) => json_start + pos,
+            None => return (text.to_string(), None),
+        };
+
+        let json_str = text[json_start..end].trim();
+        let clean = format!("{}{}", text[..start].trim_end(), text[end + marker_end.len()..].trim_start());
+        let clean = clean.trim().to_string();
+
+        // Parse JSON: array of rows, each row is array of {label, data?, url?}
+        let parsed: Vec<Vec<serde_json::Value>> = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(_) => {
+                // Try as flat array of buttons → single row
+                match serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                    Ok(flat) => vec![flat],
+                    Err(_) => return (text.to_string(), None),
+                }
+            }
+        };
+
+        let rows: Vec<Vec<InlineKeyboardButton>> = parsed
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .filter_map(|btn| {
+                        let label = btn["label"].as_str()?.to_string();
+                        if let Some(url) = btn["url"].as_str() {
+                            Some(InlineKeyboardButton::builder().text(label).url(url).build())
+                        } else {
+                            let data = btn["data"]
+                                .as_str()
+                                .unwrap_or(btn["label"].as_str().unwrap_or("?"));
+                            let data = if data.len() > 64 { &data[..64] } else { data };
+                            Some(
+                                InlineKeyboardButton::builder()
+                                    .text(label)
+                                    .callback_data(data)
+                                    .build(),
+                            )
+                        }
+                    })
+                    .collect()
+            })
+            .filter(|row: &Vec<InlineKeyboardButton>| !row.is_empty())
+            .collect();
+
+        if rows.is_empty() {
+            (clean, None)
+        } else {
+            (clean, Some(rows))
+        }
+    }
+
+    async fn send_final_with_buttons(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i32>,
+        text: &str,
+        buttons: Option<Vec<Vec<InlineKeyboardButton>>>,
+    ) {
+        let mut params = SendMessageParams::builder()
             .chat_id(chat_id)
-            .message_id(message_id)
             .text(text)
             .parse_mode(ParseMode::Html)
             .build();
 
-        if let Err(e) = self.bot.edit_message_text(&params).await {
-            tracing::error!(error = %e, chat_id, "edit failed");
+        if let Some(tid) = thread_id {
+            params.message_thread_id = Some(tid);
+        }
+
+        if let Some(rows) = buttons {
+            let keyboard = InlineKeyboardMarkup::builder()
+                .inline_keyboard(rows)
+                .build();
+            params.reply_markup = Some(ReplyMarkup::InlineKeyboardMarkup(keyboard));
+        }
+
+        if let Err(e) = self.bot.send_message(&params).await {
+            tracing::error!(error = %e, chat_id, "send with buttons failed");
         }
     }
 
