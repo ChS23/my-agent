@@ -56,20 +56,31 @@ impl Agent {
         let memories = self.memory.load_all_memories().await?;
         let mut prompt = self.identity.clone();
 
+        // User memories grouped by category
         if !memories.is_empty() {
             prompt.push_str("\n\n## What you know about the user\n\n");
+
+            let mut by_category: std::collections::BTreeMap<&str, Vec<&crate::memory::store::CoreMemory>> =
+                std::collections::BTreeMap::new();
             for m in &memories {
-                prompt.push_str(&format!("- **{}** ({}): {}\n", m.key, m.category, m.content));
+                by_category.entry(m.category.as_str()).or_default().push(m);
+            }
+
+            for (category, mems) in &by_category {
+                prompt.push_str(&format!("{}:\n", category));
+                for m in mems {
+                    prompt.push_str(&format!("  {} — {}\n", m.key, m.content));
+                }
             }
         }
 
-        // Use configured timezone
+        // Current time with day of week
         let now = chrono::Utc::now();
         let tz: chrono_tz::Tz = self.config.timezone.parse().unwrap_or(chrono_tz::Tz::UTC);
         let local = now.with_timezone(&tz);
         prompt.push_str(&format!(
             "\n\nCurrent time: {}\n",
-            local.format("%Y-%m-%d %H:%M:%S %Z")
+            local.format("%A, %Y-%m-%d %H:%M %Z")
         ));
 
         Ok(prompt)
@@ -86,7 +97,12 @@ impl Agent {
         delta_tx: mpsc::Sender<String>,
         bot: &Bot,
     ) -> Result<String> {
-        let system_prompt = self.build_system_prompt().await?;
+        let mut system_prompt = self.build_system_prompt().await?;
+
+        // Add thread context
+        if let Some(tid) = thread_id {
+            system_prompt.push_str(&format!("Thread: #{tid}\n"));
+        }
 
         // Compress old messages if history is too long
         if let Err(e) = self.maybe_compress_history(chat_id, thread_id).await {
