@@ -26,6 +26,9 @@ pub struct StreamedToolCall {
 pub struct StreamResult {
     pub text: String,
     pub tool_calls: Vec<StreamedToolCall>,
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
 }
 
 struct LlmParams {
@@ -99,10 +102,19 @@ impl LlmClient {
         let mut stream = self.client.chat().create_stream(request).await?;
         let mut text = String::new();
         let mut tool_calls: Vec<StreamedToolCall> = Vec::new();
+        let mut usage_prompt: Option<u32> = None;
+        let mut usage_completion: Option<u32> = None;
+        let mut usage_total: Option<u32> = None;
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(response) => {
+                    // Collect usage from the final chunk
+                    if let Some(ref u) = response.usage {
+                        usage_prompt = Some(u.prompt_tokens);
+                        usage_completion = Some(u.completion_tokens);
+                        usage_total = Some(u.total_tokens);
+                    }
                     for choice in &response.choices {
                         // Collect text deltas
                         if let Some(ref delta) = choice.delta.content {
@@ -157,7 +169,13 @@ impl LlmClient {
         // Filter out empty tool calls
         tool_calls.retain(|tc| !tc.name.is_empty());
 
-        Ok(StreamResult { text, tool_calls })
+        Ok(StreamResult {
+            text,
+            tool_calls,
+            prompt_tokens: usage_prompt,
+            completion_tokens: usage_completion,
+            total_tokens: usage_total,
+        })
     }
 }
 

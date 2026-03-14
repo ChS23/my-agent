@@ -4,7 +4,7 @@ use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
-    CreateChatCompletionRequestArgs, FunctionCall,
+    ChatCompletionStreamOptions, CreateChatCompletionRequestArgs, FunctionCall,
 };
 use frankenstein::client_reqwest::Bot;
 use tokio::sync::mpsc;
@@ -98,10 +98,13 @@ impl Agent {
         name = "message",
         skip(self, image_urls, delta_tx, bot),
         fields(
+            langfuse.trace.name = "message",
             langfuse.session.id = %format!("{}:{}", chat_id, thread_id.unwrap_or(0)),
             langfuse.user.id = %username,
             langfuse.trace.input = %truncate_str(user_message, 500),
             langfuse.trace.output = tracing::field::Empty,
+            langfuse.trace.metadata.chat_id = chat_id,
+            langfuse.trace.metadata.thread_id = ?thread_id,
         )
     )]
     pub async fn process_message(
@@ -146,7 +149,11 @@ impl Agent {
                 .model(self.llm.model())
                 .temperature(self.llm.temperature())
                 .max_tokens(self.llm.max_tokens())
-                .messages(messages.clone());
+                .messages(messages.clone())
+                .stream_options(ChatCompletionStreamOptions {
+                    include_usage: Some(true),
+                    include_obfuscation: None,
+                });
 
             if !tool_specs.is_empty() {
                 builder.tools(tool_specs.clone());
@@ -155,17 +162,33 @@ impl Agent {
             let request = builder.build()?;
 
             // Always stream — collect text + tool calls from stream
+            let model_params = serde_json::json!({
+                "temperature": self.llm.temperature(),
+                "max_tokens": self.llm.max_tokens(),
+            }).to_string();
             let llm_span = tracing::info_span!(
                 "llm_call",
                 langfuse.observation.r#type = "generation",
-                gen_ai.request.model = %self.llm.model(),
-                gen_ai.request.temperature = %self.llm.temperature(),
-                gen_ai.request.max_tokens = %self.llm.max_tokens(),
+                langfuse.observation.model.name = %self.llm.model(),
+                langfuse.observation.model.parameters = %model_params,
+                langfuse.observation.input = %truncate_str(user_message, 1000),
+                langfuse.observation.output = tracing::field::Empty,
+                langfuse.observation.usage_details = tracing::field::Empty,
                 iteration = iteration,
             );
+            let llm_span_ref = llm_span.clone();
             let result = self.llm.stream_chat(request, delta_tx.clone())
                 .instrument(llm_span)
                 .await?;
+            llm_span_ref.record("langfuse.observation.output", truncate_str(&result.text, 500));
+            if let (Some(pt), Some(ct)) = (result.prompt_tokens, result.completion_tokens) {
+                let usage = serde_json::json!({
+                    "input": pt,
+                    "output": ct,
+                    "total": result.total_tokens.unwrap_or(pt + ct),
+                }).to_string();
+                llm_span_ref.record("langfuse.observation.usage_details", &usage);
+            }
 
             if result.tool_calls.is_empty() {
                 // No tool calls — we're done, text was already streamed
@@ -173,6 +196,7 @@ impl Agent {
                     .save_message(chat_id, thread_id, "assistant", &result.text)
                     .await?;
 
+                // Record output on both the generation span (parent) and trace span
                 tracing::Span::current().record("langfuse.trace.output", truncate_str(&result.text, 500));
                 tracing::info!(chat_id, iterations = iteration + 1, len = result.text.len(), "done");
                 return Ok(result.text);
@@ -230,7 +254,10 @@ impl Agent {
                     "tool_call",
                     langfuse.observation.r#type = "span",
                     tool.name = %tc.name,
+                    langfuse.observation.input = %truncate_str(&tc.arguments, 1000),
+                    langfuse.observation.output = tracing::field::Empty,
                 );
+                let tool_span_ref = tool_span.clone();
                 let tool_result = crate::tools::execute_tool(
                     &tc.name,
                     &tc.arguments,
@@ -246,6 +273,7 @@ impl Agent {
                         format!("Error: {e}")
                     }
                 };
+                tool_span_ref.record("langfuse.observation.output", truncate_str(&output, 500));
 
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
