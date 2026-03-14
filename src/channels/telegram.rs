@@ -194,7 +194,7 @@ impl TelegramBot {
 
         // Process message (drives delta_tx via LLM streaming)
         let result = agent
-            .process_message(chat_id, thread_id, &text, &image_urls, delta_tx, &self.bot)
+            .process_message(chat_id, thread_id, username, &text, &image_urls, delta_tx, &self.bot)
             .await;
 
         // Wait for streaming task
@@ -327,7 +327,7 @@ impl TelegramBot {
             tokio::spawn(Self::stream_to_telegram(bot, chat_id, thread_id, throttle, delta_rx));
 
         let result = agent
-            .process_message(chat_id, thread_id, &data, &[], delta_tx, &self.bot)
+            .process_message(chat_id, thread_id, username, &data, &[], delta_tx, &self.bot)
             .await;
 
         let _ = stream_handle.await;

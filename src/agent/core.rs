@@ -95,19 +95,20 @@ impl Agent {
     /// Process a user message. Streams text deltas through `delta_tx`.
     /// Handles tool calls in a loop. Returns final assistant text.
     #[tracing::instrument(
+        name = "message",
         skip(self, image_urls, delta_tx, bot),
         fields(
-            langfuse.trace.name = "message",
             langfuse.session.id = %format!("{}:{}", chat_id, thread_id.unwrap_or(0)),
+            langfuse.user.id = %username,
             langfuse.trace.input = %truncate_str(user_message, 500),
             langfuse.trace.output = tracing::field::Empty,
-            gen_ai.request.model = %self.llm.model(),
         )
     )]
     pub async fn process_message(
         &self,
         chat_id: i64,
         thread_id: Option<i32>,
+        username: &str,
         user_message: &str,
         image_urls: &[String],
         delta_tx: mpsc::Sender<String>,
