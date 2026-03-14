@@ -44,6 +44,7 @@ pub struct SttConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct TelegramConfig {
+    #[serde(default)]
     pub allowed_users: Vec<String>,
     #[serde(default = "default_stream_throttle")]
     pub stream_throttle_ms: u64,
@@ -136,7 +137,17 @@ impl Config {
             .add_source(config::Environment::with_prefix("AGENT").separator("__"))
             .build()?;
 
-        let config: Config = settings.try_deserialize()?;
+        let mut config: Config = settings.try_deserialize()?;
+
+        // Override allowed_users from env (comma-separated)
+        if let Ok(val) = std::env::var("TELEGRAM_ALLOWED_USERS") {
+            config.telegram.allowed_users = val
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+
         config.validate()?;
         Ok(config)
     }

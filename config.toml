@@ -16,7 +16,6 @@ enabled = true
 model = "qwen/qwen3-embedding-8b"
 
 [telegram]
-allowed_users = ["chs_23"]
 stream_throttle_ms = 300
 
 [scheduler]

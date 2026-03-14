@@ -1,0 +1,16 @@
+services:
+  agent:
+    build: .
+    container_name: ai-agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - RUST_LOG=info,agent=debug
+      - TZ=Europe/Moscow
+    volumes:
+      - agent-data:/app/data
+      - agent-skills:/app/skills
+
+volumes:
+  agent-data:
+  agent-skills:
