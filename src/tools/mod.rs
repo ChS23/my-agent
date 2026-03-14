@@ -13,7 +13,7 @@ pub use memory::MemoryForgetTool;
 pub use memory::MemorySearchTool;
 pub use memory::MemoryStoreTool;
 pub use schedule::{ScheduleAddTool, ScheduleCancelTool, ScheduleListTool};
-pub use ticktick::{TickTickAuthTool, TickTickCompleteTool, TickTickCreateTool, TickTickDeleteTool, TickTickListTool};
+pub use ticktick::{TickTickAuthTool, TickTickCallbackTool, TickTickCompleteTool, TickTickCreateTool, TickTickDeleteTool, TickTickListTool};
 pub use topics::{CloseTopicTool, CreateTopicTool, DeleteTopicTool, RenameTopicTool, ReopenTopicTool};
 pub use model::{GetModelTool, SetModelTool};
 pub use url_reader::UrlReaderTool;
@@ -70,6 +70,7 @@ pub fn tool_specs(has_ticktick: bool, skills: &[Skill]) -> Vec<ChatCompletionToo
 
     if has_ticktick {
         specs.push(TickTickAuthTool::spec());
+        specs.push(TickTickCallbackTool::spec());
         specs.push(TickTickCreateTool::spec());
         specs.push(TickTickListTool::spec());
         specs.push(TickTickCompleteTool::spec());
@@ -111,6 +112,10 @@ pub async fn execute_tool(
         "ticktick_auth" => {
             let client = ctx.ticktick.ok_or_else(|| anyhow::anyhow!("TickTick not configured"))?;
             TickTickAuthTool::execute(client).await
+        }
+        "ticktick_callback" => {
+            let client = ctx.ticktick.ok_or_else(|| anyhow::anyhow!("TickTick not configured"))?;
+            TickTickCallbackTool::execute(arguments, client).await
         }
         "ticktick_create" => {
             let client = ctx.ticktick.ok_or_else(|| anyhow::anyhow!("TickTick not configured"))?;

@@ -19,7 +19,7 @@ impl TickTickAuthTool {
             "type": "function",
             "function": {
                 "name": "ticktick_auth",
-                "description": "Start TickTick OAuth2 authorization. Returns a URL the user must visit to authorize. After authorizing, the token is saved automatically via localhost callback.",
+                "description": "Start TickTick OAuth2 authorization. Returns a URL the user must visit. After authorizing, the browser redirects to localhost — if running locally, the token is saved automatically. If running in Docker, ask the user to paste the redirect URL back into the chat, then use ticktick_callback to exchange the code.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -39,25 +39,77 @@ impl TickTickAuthTool {
 
         let auth_url = client.token_store().auth_url();
 
-        // Start callback server in background
+        // Start callback server in background (works for local dev)
         let token_store = client.token_store().clone();
         tokio::spawn(async move {
             match crate::ticktick::TokenStore::wait_for_callback().await {
                 Ok(code) => {
                     match token_store.exchange_code(&code).await {
-                        Ok(_) => tracing::info!("TickTick OAuth complete"),
+                        Ok(_) => tracing::info!("TickTick OAuth complete via localhost"),
                         Err(e) => tracing::error!(error = %e, "TickTick token exchange failed"),
                     }
                 }
-                Err(e) => tracing::error!(error = %e, "TickTick callback failed"),
+                Err(e) => tracing::debug!(error = %e, "TickTick localhost callback not available (expected in Docker)"),
             }
         });
 
         Ok(ToolResult {
             output: format!(
-                "Open this URL to authorize TickTick:\n{}\n\nAfter authorizing, you'll be redirected to localhost and tokens will be saved automatically.",
+                "Open this URL to authorize TickTick:\n{}\n\n\
+                 If localhost redirect works — done automatically.\n\
+                 If not (Docker) — paste the redirect URL from the browser address bar here, \
+                 and I'll extract the code with ticktick_callback.",
                 auth_url
             ),
+        })
+    }
+}
+
+pub struct TickTickCallbackTool;
+
+impl TickTickCallbackTool {
+    pub fn spec() -> ChatCompletionTools {
+        serde_json::from_value(json!({
+            "type": "function",
+            "function": {
+                "name": "ticktick_callback",
+                "description": "Exchange a TickTick OAuth callback URL or authorization code for access tokens. Use when the user pastes a URL like 'http://localhost:8080/callback?code=...' or just the code itself.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url_or_code": {
+                            "type": "string",
+                            "description": "The full redirect URL or just the authorization code"
+                        }
+                    },
+                    "required": ["url_or_code"]
+                }
+            }
+        }))
+        .expect("valid tool spec")
+    }
+
+    pub async fn execute(arguments: &str, client: &TickTickClient) -> Result<ToolResult> {
+        let args: serde_json::Value = serde_json::from_str(arguments)?;
+        let input = args["url_or_code"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing 'url_or_code'"))?;
+
+        // Extract code from URL or use as-is
+        let code = if input.contains("code=") {
+            input
+                .split("code=")
+                .nth(1)
+                .and_then(|s| s.split('&').next())
+                .unwrap_or(input)
+        } else {
+            input.trim()
+        };
+
+        client.token_store().exchange_code(code).await?;
+
+        Ok(ToolResult {
+            output: "TickTick authorized successfully!".to_string(),
         })
     }
 }
