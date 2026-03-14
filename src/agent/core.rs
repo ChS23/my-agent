@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tracing::Instrument;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
@@ -93,6 +94,16 @@ impl Agent {
 
     /// Process a user message. Streams text deltas through `delta_tx`.
     /// Handles tool calls in a loop. Returns final assistant text.
+    #[tracing::instrument(
+        skip(self, image_urls, delta_tx, bot),
+        fields(
+            langfuse.trace.name = "message",
+            langfuse.session.id = %format!("{}:{}", chat_id, thread_id.unwrap_or(0)),
+            langfuse.trace.input = %truncate_str(user_message, 500),
+            langfuse.trace.output = tracing::field::Empty,
+            gen_ai.request.model = %self.llm.model(),
+        )
+    )]
     pub async fn process_message(
         &self,
         chat_id: i64,
@@ -143,7 +154,17 @@ impl Agent {
             let request = builder.build()?;
 
             // Always stream — collect text + tool calls from stream
-            let result = self.llm.stream_chat(request, delta_tx.clone()).await?;
+            let llm_span = tracing::info_span!(
+                "llm_call",
+                langfuse.observation.r#type = "generation",
+                gen_ai.request.model = %self.llm.model(),
+                gen_ai.request.temperature = %self.llm.temperature(),
+                gen_ai.request.max_tokens = %self.llm.max_tokens(),
+                iteration = iteration,
+            );
+            let result = self.llm.stream_chat(request, delta_tx.clone())
+                .instrument(llm_span)
+                .await?;
 
             if result.tool_calls.is_empty() {
                 // No tool calls — we're done, text was already streamed
@@ -151,6 +172,7 @@ impl Agent {
                     .save_message(chat_id, thread_id, "assistant", &result.text)
                     .await?;
 
+                tracing::Span::current().record("langfuse.trace.output", truncate_str(&result.text, 500));
                 tracing::info!(chat_id, iterations = iteration + 1, len = result.text.len(), "done");
                 return Ok(result.text);
             }
@@ -203,11 +225,17 @@ impl Agent {
                 skills: &self.skills,
             };
             for tc in &result.tool_calls {
+                let tool_span = tracing::info_span!(
+                    "tool_call",
+                    langfuse.observation.r#type = "span",
+                    tool.name = %tc.name,
+                );
                 let tool_result = crate::tools::execute_tool(
                     &tc.name,
                     &tc.arguments,
                     &tool_ctx,
                 )
+                .instrument(tool_span)
                 .await;
 
                 let output = match tool_result {

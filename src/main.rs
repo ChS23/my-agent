@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod llm;
 mod memory;
+mod observability;
 mod scheduler;
 mod skills;
 mod ticktick;
@@ -12,22 +13,38 @@ mod tools;
 use std::sync::Arc;
 
 use anyhow::Result;
+use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env
     dotenvy::dotenv().ok();
 
-    // Init tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_env("RUST_LOG")
-                .unwrap_or_else(|_| EnvFilter::new("info,agent=debug")),
-        )
+    // Init Langfuse/OTel (before tracing subscriber so we can add the layer)
+    let langfuse_provider = observability::init_langfuse()?;
+
+    // Init tracing (with optional OTel layer for Langfuse)
+    let env_filter = EnvFilter::try_from_env("RUST_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info,agent=debug"));
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
-        .compact()
-        .init();
+        .compact();
+
+    let registry = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer);
+
+    if let Some(ref provider) = langfuse_provider {
+        let tracer = provider.tracer("my-agent");
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        registry.with(otel_layer).init();
+    } else {
+        registry.init();
+    }
 
     tracing::info!("starting agent");
 
@@ -177,6 +194,13 @@ async fn main() -> Result<()> {
 
     // Run telegram polling (blocks until shutdown)
     telegram.run(agent, tg_shutdown).await?;
+
+    // Flush Langfuse traces before exit
+    if let Some(provider) = langfuse_provider {
+        if let Err(e) = provider.shutdown() {
+            tracing::warn!(error = %e, "langfuse shutdown error");
+        }
+    }
 
     tracing::info!("agent stopped");
     Ok(())
