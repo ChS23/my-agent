@@ -9,6 +9,7 @@ services:
       - ./SOUL.md:/app/SOUL.md:ro
       - ./IDENTITY.md:/app/IDENTITY.md:ro
       - ./FORMAT.md:/app/FORMAT.md:ro
+      - ./skills:/app/skills
     env_file: .env
     environment:
       - RUST_LOG=info,agent=debug
