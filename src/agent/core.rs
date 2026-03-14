@@ -25,6 +25,9 @@ pub struct Agent {
     schedule_store: ScheduleStore,
     ticktick: Option<TickTickClient>,
     identity: String,
+    /// Critical sections extracted from identity (between <!-- precompact --> markers).
+    /// Re-injected after history compression so the LLM never forgets them.
+    precompact: String,
     config: AgentConfig,
     skills: Vec<Skill>,
 }
@@ -40,6 +43,7 @@ impl Agent {
         config: AgentConfig,
         skills: Vec<Skill>,
     ) -> Self {
+        let precompact = extract_precompact(&identity);
         Self {
             llm,
             embeddings,
@@ -47,6 +51,7 @@ impl Agent {
             schedule_store,
             ticktick,
             identity,
+            precompact,
             config,
             skills,
         }
@@ -307,6 +312,16 @@ impl Agent {
             return Ok(());
         }
 
+        // Re-inject critical sections after summary (PreCompact pattern)
+        let summary = if self.precompact.is_empty() {
+            summary
+        } else {
+            format!(
+                "{}\n\n---\n[Critical rules — always follow]\n{}",
+                summary, self.precompact
+            )
+        };
+
         // Delete old messages and insert summary
         let compressed_count = to_compress.len();
         self.memory
@@ -521,6 +536,36 @@ impl Agent {
             let _ = bot.edit_forum_topic(&icon_params).await;
         }
     }
+}
+
+/// Extract sections between `<!-- precompact -->` and `<!-- /precompact -->` markers.
+fn extract_precompact(identity: &str) -> String {
+    let mut sections = Vec::new();
+    let mut in_section = false;
+    let mut current = String::new();
+
+    for line in identity.lines() {
+        let trimmed = line.trim();
+        if trimmed == "<!-- precompact -->" {
+            in_section = true;
+            current.clear();
+            continue;
+        }
+        if trimmed == "<!-- /precompact -->" {
+            if in_section && !current.trim().is_empty() {
+                sections.push(current.trim().to_string());
+            }
+            in_section = false;
+            current.clear();
+            continue;
+        }
+        if in_section {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+
+    sections.join("\n\n")
 }
 
 fn truncate_str(s: &str, max: usize) -> &str {

@@ -1,3 +1,4 @@
+<!-- precompact -->
 ## Output format
 
 You are in Telegram. Use ONLY Telegram HTML for formatting. Do NOT use Markdown.
@@ -14,6 +15,7 @@ Rules:
 - Escape &, <, > in regular text as &amp; &lt; &gt;
 - Use plain text lists with bullet characters (•, —) or numbers
 - Keep formatting minimal — don't over-format
+<!-- /precompact -->
 
 ## Suggested actions (buttons)
 
