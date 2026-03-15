@@ -94,19 +94,6 @@ impl Agent {
 
     /// Process a user message. Streams text deltas through `delta_tx`.
     /// Handles tool calls in a loop. Returns final assistant text.
-    #[tracing::instrument(
-        name = "message",
-        skip(self, image_urls, delta_tx, bot),
-        fields(
-            langfuse.trace.name = "message",
-            langfuse.session.id = %format!("{}:{}", chat_id, thread_id.unwrap_or(0)),
-            langfuse.user.id = %username,
-            langfuse.trace.input = %truncate_str(user_message, 500),
-            langfuse.trace.output = tracing::field::Empty,
-            langfuse.trace.metadata.chat_id = chat_id,
-            langfuse.trace.metadata.thread_id = ?thread_id,
-        )
-    )]
     pub async fn process_message(
         &self,
         chat_id: i64,
@@ -117,6 +104,19 @@ impl Agent {
         delta_tx: mpsc::Sender<String>,
         bot: &Bot,
     ) -> Result<String> {
+        let session_id = format!("{}:{}", chat_id, thread_id.unwrap_or(0));
+        let trace_span = tracing::info_span!(
+            "message",
+            langfuse.trace.name = "message",
+            langfuse.session.id = %session_id,
+            langfuse.user.id = %username,
+            langfuse.trace.input = %truncate_str(user_message, 500),
+            langfuse.trace.output = tracing::field::Empty,
+            langfuse.trace.metadata.chat_id = chat_id,
+            langfuse.trace.metadata.thread_id = ?thread_id,
+        );
+        let trace_span_ref = trace_span.clone();
+        async move {
         let mut system_prompt = self.build_system_prompt().await?;
 
         // Add thread context
@@ -196,8 +196,8 @@ impl Agent {
                     .save_message(chat_id, thread_id, "assistant", &result.text)
                     .await?;
 
-                // Record output on both the generation span (parent) and trace span
-                tracing::Span::current().record("langfuse.trace.output", truncate_str(&result.text, 500));
+                // Record output on the trace span
+                trace_span_ref.record("langfuse.trace.output", truncate_str(&result.text, 500));
                 tracing::info!(chat_id, iterations = iteration + 1, len = result.text.len(), "done");
                 return Ok(result.text);
             }
@@ -288,6 +288,7 @@ impl Agent {
             "Exceeded max tool iterations ({})",
             self.config.max_tool_iterations
         )
+        }.instrument(trace_span).await
     }
 
     /// Compress old messages into a summary when history exceeds threshold.
