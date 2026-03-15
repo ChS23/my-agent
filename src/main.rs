@@ -23,7 +23,15 @@ async fn main() -> Result<()> {
     // Load .env
     dotenvy::dotenv().ok();
 
-    // Init tracing first (with reloadable OTel layer — starts as None)
+    // Init Langfuse/OTel (before tracing subscriber — needs OTel layer)
+    let langfuse_provider = observability::init_langfuse()?;
+
+    // Build OTel layer (Option<Layer> is no-op when None)
+    let otel_layer = langfuse_provider.as_ref().map(|provider| {
+        let tracer = provider.tracer("my-agent");
+        tracing_opentelemetry::layer().with_tracer(tracer)
+    });
+
     let env_filter = EnvFilter::try_from_env("RUST_LOG")
         .unwrap_or_else(|_| EnvFilter::new("info,agent=debug,opentelemetry=debug"));
 
@@ -31,23 +39,11 @@ async fn main() -> Result<()> {
         .with_target(true)
         .compact();
 
-    let (otel_layer, otel_reload) = tracing_subscriber::reload::Layer::new(
-        Option::<tracing_opentelemetry::OpenTelemetryLayer<_, _>>::None,
-    );
-
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt_layer)
         .with(otel_layer)
         .init();
-
-    // Now init Langfuse (tracing is available for logging)
-    let langfuse_provider = observability::init_langfuse()?;
-    if let Some(ref provider) = langfuse_provider {
-        let tracer = provider.tracer("my-agent");
-        let layer = tracing_opentelemetry::layer().with_tracer(tracer);
-        otel_reload.reload(Some(layer)).ok();
-    }
 
     tracing::info!("starting agent");
 
