@@ -1,7 +1,8 @@
 [package]
 name = "agent"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.92"
 
 [dependencies]
 # Async
@@ -35,7 +36,7 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["http-json"] }
 
 # Web search (DuckDuckGo HTML parsing)
-scraper = "0.22"
+scraper = "0.25"
 
 # Scheduler
 cron = "0.15"
@@ -54,6 +55,13 @@ uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
 strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2

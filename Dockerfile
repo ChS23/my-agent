@@ -1,4 +1,4 @@
-FROM rust:1-alpine3.22 AS builder
+FROM rust:1.92-alpine3.22 AS builder
 
 RUN apk add --no-cache musl-dev cmake make perl gcc g++
 
