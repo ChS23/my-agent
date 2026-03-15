@@ -96,7 +96,34 @@ impl Scheduler {
 
                     use frankenstein::AsyncTelegramApi;
                     if let Err(e) = bot.send_message(&params).await {
-                        tracing::error!(error = %e, job_id = %job.id, "failed to send scheduled message");
+                        let err_str = e.to_string();
+                        if err_str.contains("thread not found") && job.thread_id.is_some() {
+                            // Thread deleted — create a new one and retry
+                            tracing::warn!(job_id = %job.id, name = %job.name, "thread gone, creating new one");
+                            let topic_params = frankenstein::methods::CreateForumTopicParams::builder()
+                                .chat_id(job.chat_id)
+                                .name(&format!("[sched] {}", job.name))
+                                .build();
+                            match bot.create_forum_topic(&topic_params).await {
+                                Ok(topic) => {
+                                    let new_tid = topic.result.message_thread_id;
+                                    self.store.update_thread_id(&job.id, new_tid).await?;
+                                    params.message_thread_id = Some(new_tid);
+                                    if let Err(e2) = bot.send_message(&params).await {
+                                        tracing::error!(error = %e2, job_id = %job.id, "retry send failed");
+                                    }
+                                }
+                                Err(e2) => {
+                                    tracing::error!(error = %e2, job_id = %job.id, "failed to create new thread, disabling job");
+                                    self.store.set_enabled(&job.id, false).await?;
+                                }
+                            }
+                        } else if err_str.contains("chat not found") {
+                            tracing::warn!(job_id = %job.id, name = %job.name, "chat gone, disabling job");
+                            self.store.set_enabled(&job.id, false).await?;
+                        } else {
+                            tracing::error!(error = %e, job_id = %job.id, "failed to send scheduled message");
+                        }
                     }
 
                     self.store

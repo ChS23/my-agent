@@ -306,6 +306,20 @@ impl ScheduleStore {
         Ok(())
     }
 
+    pub async fn update_thread_id(&self, id: &str, thread_id: i32) -> Result<()> {
+        let id = id.to_string();
+        self.conn
+            .call(move |db| {
+                db.execute(
+                    "UPDATE scheduled_jobs SET thread_id = ?1 WHERE id = ?2",
+                    rusqlite::params![thread_id, id],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn mark_completed(&self, id: &str, status: &str, output: &str) -> Result<()> {
         let id = id.to_string();
         let status = status.to_string();
